@@ -1,0 +1,2634 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PE Master - 초등학교 체육 수업 관리 시스템</title>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        brand: {
+                            50: '#f0f9ff',
+                            100: '#e0f2fe',
+                            500: '#0284c7',
+                            600: '#0369a1',
+                            700: '#075985',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- React & ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- SheetJS (XLSX) for Excel File Parsing -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <!-- Canvas Confetti -->
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+
+    <style>
+        @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
+        body {
+            font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, Roboto, sans-serif;
+            touch-action: manipulation;
+        }
+        /* Touch friendly scrollbars & UI sizing */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+        }
+        /* Presentation Mode Font Scaling */
+        .presentation-title {
+            font-size: clamp(1.8rem, 4vw, 3rem);
+        }
+        .presentation-body {
+            font-size: clamp(1.2rem, 2.5vw, 1.8rem);
+        }
+    </style>
+</head>
+<body class="bg-slate-100 text-slate-800 antialiased min-h-screen">
+    <div id="root"></div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global Firebase Cloud Sync Bridge
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'pe-master-app';
+        let firebaseConfig = null;
+        if (typeof __firebase_config !== 'undefined') {
+            try { firebaseConfig = JSON.parse(__firebase_config); } catch(e) { console.error(e); }
+        }
+        // Fallback to custom config saved in localStorage for external deployments like GitHub Pages
+        if (!firebaseConfig) {
+            const savedConfig = localStorage.getItem('PE_FIREBASE_CONFIG');
+            if (savedConfig) {
+                try { firebaseConfig = JSON.parse(savedConfig); } catch(e) { console.error(e); }
+            }
+        }
+
+        window.PE_CLOUD = {
+            isAvailable: false,
+            syncCode: localStorage.getItem('PE_SYNC_CODE') || 'MAIN',
+            user: null,
+            db: null,
+            unsubscribe: null,
+            
+            init: async function(onRemoteDataReceived, onStatusChanged) {
+                if (!firebaseConfig) {
+                    onStatusChanged('OFFLINE', '로컬 저장 모드 (Firebase Config 입력 시 실시간 연동)');
+                    return;
+                }
+
+                try {
+                    const app = initializeApp(firebaseConfig);
+                    const auth = getAuth(app);
+                    const db = getFirestore(app);
+                    this.db = db;
+
+                    onStatusChanged('CONNECTING', '클라우드 연동 접속 중...');
+
+                    let userCredential;
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        userCredential = await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        userCredential = await signInAnonymously(auth);
+                    }
+                    this.user = userCredential.user;
+                    this.isAvailable = true;
+
+                    this.subscribeToSyncCode(this.syncCode, onRemoteDataReceived, onStatusChanged);
+                } catch(err) {
+                    console.error("Cloud init error:", err);
+                    onStatusChanged('ERROR', '클라우드 연결 오류 (' + err.message + ')');
+                }
+            },
+
+            saveCustomConfig: function(configStr) {
+                try {
+                    let str = String(configStr || '').trim();
+                    if (!str) {
+                        alert('Firebase Config 내용을 입력해 주세요.');
+                        return false;
+                    }
+
+                    if (str.includes('{') && str.includes('}')) {
+                        str = str.substring(str.indexOf('{'), str.lastIndexOf('}') + 1);
+                    }
+
+                    let parsed = null;
+                    try {
+                        parsed = JSON.parse(str);
+                    } catch(e) {
+                        try {
+                            // Smart Safe JS Object Evaluator
+                            parsed = (new Function('return (' + str + ')'))();
+                        } catch(errEval) {
+                            console.error("Eval parse error:", errEval);
+                        }
+                    }
+
+                    if (parsed && typeof parsed === 'object' && parsed.apiKey && parsed.projectId) {
+                        localStorage.setItem('PE_FIREBASE_CONFIG', JSON.stringify(parsed));
+                        firebaseConfig = parsed;
+                        return true;
+                    } else {
+                        alert('Firebase Config 데이터에 필수 항목(apiKey, projectId)이 포함되어 있지 않습니다.');
+                        return false;
+                    }
+                } catch(e) {
+                    alert('Firebase Config 형식을 인식하지 못했습니다. Firebase 화면에 있는 텍스트 전체를 붙여넣어 주세요.');
+                    return false;
+                }
+            },
+
+            subscribeToSyncCode: function(code, onRemoteDataReceived, onStatusChanged) {
+                if (!this.db || !this.user) return;
+                if (this.unsubscribe) this.unsubscribe();
+
+                this.syncCode = code || 'MAIN';
+                localStorage.setItem('PE_SYNC_CODE', this.syncCode);
+
+                const docRef = doc(this.db, 'artifacts', appId, 'public', 'data', 'pe_master_rooms', `sync_${this.syncCode}`);
+
+                onStatusChanged('CONNECTING', `동기화 코드 [${this.syncCode}] 연결 중...`);
+
+                this.unsubscribe = onSnapshot(docRef, (snap) => {
+                    if (snap.exists()) {
+                        const data = snap.data();
+                        if (data && data.db) {
+                            onRemoteDataReceived(data.db);
+                            onStatusChanged('CONNECTED', `실시간 클라우드 동기화 중 [코드: ${this.syncCode}]`);
+                        }
+                    } else {
+                        onStatusChanged('CONNECTED', `동기화 코드 [${this.syncCode}] 신규 생성됨`);
+                    }
+                }, (error) => {
+                    console.error("Firestore onSnapshot error:", error);
+                    onStatusChanged('ERROR', '클라우드 동기화 수신 오류');
+                });
+            },
+
+            saveToCloud: async function(data) {
+                if (!this.isAvailable || !this.db || !this.user) return;
+                try {
+                    const docRef = doc(this.db, 'artifacts', appId, 'public', 'data', 'pe_master_rooms', `sync_${this.syncCode}`);
+                    await setDoc(docRef, {
+                        db: data,
+                        lastUpdated: new Date().toISOString(),
+                        updatedBy: this.user.uid
+                    }, { merge: true });
+                } catch(e) {
+                    console.error("Cloud save failed:", e);
+                }
+            }
+        };
+    </script>
+
+    <script type="text/babel">
+        const INITIAL_SEED = {
+            schoolYears: [
+                { id: 'sy_2026', year: '2026학년도', isCurrent: true },
+                { id: 'sy_2027', year: '2027학년도', isCurrent: false }
+            ],
+            grades: [
+                { id: 'g_3', schoolYearId: 'sy_2026', gradeNumber: 3, displayName: '3학년', active: true, curriculumId: 'curr_3_2' },
+                { id: 'g_5', schoolYearId: 'sy_2026', gradeNumber: 5, displayName: '5학년', active: true, curriculumId: 'curr_5_2' }
+            ],
+            classes: [
+                { id: 'c_3_1', gradeId: 'g_3', classNumber: 1, displayName: '3-1', active: true },
+                { id: 'c_3_2', gradeId: 'g_3', classNumber: 2, displayName: '3-2', active: true },
+                { id: 'c_3_3', gradeId: 'g_3', classNumber: 3, displayName: '3-3', active: true },
+                { id: 'c_3_4', gradeId: 'g_3', classNumber: 4, displayName: '3-4', active: true },
+                { id: 'c_3_5', gradeId: 'g_3', classNumber: 5, displayName: '3-5', active: true },
+                
+                { id: 'c_5_1', gradeId: 'g_5', classNumber: 1, displayName: '5-1', active: true },
+                { id: 'c_5_2', gradeId: 'g_5', classNumber: 2, displayName: '5-2', active: true },
+                { id: 'c_5_3', gradeId: 'g_5', classNumber: 3, displayName: '5-3', active: true },
+                { id: 'c_5_4', gradeId: 'g_5', classNumber: 4, displayName: '5-4', active: true },
+                { id: 'c_5_5', gradeId: 'g_5', classNumber: 5, displayName: '5-5', active: true },
+                { id: 'c_5_6', gradeId: 'g_5', classNumber: 6, displayName: '5-6', active: true }
+            ],
+            curriculums: [
+                {
+                    id: 'curr_3_2',
+                    schoolYearId: 'sy_2026',
+                    gradeId: 'g_3',
+                    semester: '2학기',
+                    subject: '체육',
+                    title: '3학년 2학기 체육 교육과정',
+                    totalLessons: 33,
+                    lessons: Array.from({ length: 33 }, (_, i) => ({
+                        id: `l_3_${i+1}`,
+                        lessonNumber: i + 1,
+                        unit: i < 10 ? '운동 - 건강한 생활' : (i < 20 ? '스포츠 - 조작 움직임' : '표현 - 움직임의 세계'),
+                        topic: i === 12 ? '배고픈 바구니 (볼 던지기)' : (i === 11 ? '공을 튀겨요' : `${i+1}차시 신체 활동`),
+                        objective: `${i+1}차시의 기본 움직임 규칙을 이해하고 즐겁게 참여한다.`,
+                        mainActivity: '1. 모둠별 체온 올리기 게임\n2. 주 활동 규칙 숙지 및 연습\n3. 모둠 대항전 진행',
+                        gameActivity: '배고픈 바구니 게임 (제한 시간 내 공 던져 넣기)',
+                        materials: i === 12 ? '바구니, 원색 공, 콘, 팀 조끼' : '공, 콘, 후프',
+                        assessment: '활동 규칙을 준수하고 모둠원과 협력하는가?',
+                        edutech: '디지털 타이머, 동작 분석 태블릿 앱',
+                        difficultyEasy: '가까운 거리에서 던지기',
+                        difficultyBasic: '기본 거리에서 목표물 던지기',
+                        difficultyChallenge: '움직이는 목표물에 던지기'
+                    }))
+                },
+                {
+                    id: 'curr_5_2',
+                    schoolYearId: 'sy_2026',
+                    gradeId: 'g_5',
+                    semester: '2학기',
+                    subject: '체육',
+                    title: '5학년 2학기 체육 교육과정',
+                    totalLessons: 34,
+                    lessons: Array.from({ length: 34 }, (_, i) => ({
+                        id: `l_5_${i+1}`,
+                        lessonNumber: i + 1,
+                        unit: i < 12 ? '경쟁 - 영역형 경쟁' : '표현 - 주제 표현',
+                        topic: `${i+1}차시 농구형 게임 기초`,
+                        objective: '농구 패스와 드리블의 기본 요소를 이해하고 적용한다.',
+                        mainActivity: '1. 패스 연습 (체스트/바운드)\n2. 드리블 릴레이 레이스\n3. 간이 농구 게임',
+                        gameActivity: '4대4 라인 농구 게임',
+                        materials: '농구공, 콘, 팀 조끼',
+                        assessment: '상황에 맞는 패스 기량을 발휘하는가?',
+                        edutech: '경기 영상 녹화 분석',
+                        difficultyEasy: '제자리 패스',
+                        difficultyBasic: '이동 중 패스',
+                        difficultyChallenge: '수비가 있는 상태에서 패스'
+                    }))
+                }
+            ],
+            lessonRecords: {
+                'c_3_1_13': { status: 'COMPLETE', date: '2026-08-25', memo: '학생들 호응 매우 높았음', nextMemo: '던지기 거리 약간 늘리기' },
+                'c_3_2_12': { status: 'COMPLETE', date: '2026-08-25', memo: '공 부족으로 2인 1조 진행', nextMemo: '수업 시작 전 던지기 복습 필요' }
+            },
+            classProgressCursors: {
+                'c_3_1': 13,
+                'c_3_2': 12,
+                'c_3_3': 13,
+                'c_3_4': 11,
+                'c_3_5': 14,
+                'c_5_1': 10,
+                'c_5_2': 11,
+                'c_5_3': 10,
+                'c_5_4': 9,
+                'c_5_5': 12,
+                'c_5_6': 10
+            },
+            equipment: [
+                { id: 'eq_1', name: '바구니', quantity: 6 },
+                { id: 'eq_2', name: '원색 공', quantity: 8 },
+                { id: 'eq_3', name: '콘', quantity: 30 },
+                { id: 'eq_4', name: '팀 조끼', quantity: 40 },
+                { id: 'eq_5', name: '농구공', quantity: 18 },
+                { id: 'eq_6', name: '후프', quantity: 15 }
+            ]
+        };
+
+        function App() {
+            const [db, setDb] = React.useState(() => {
+                const saved = localStorage.getItem('PE_MASTER_DB_V3');
+                if (saved) {
+                    try { return JSON.parse(saved); } catch (e) { console.error(e); }
+                }
+                return INITIAL_SEED;
+            });
+
+            const [cloudStatus, setCloudStatus] = React.useState({ state: 'CONNECTING', msg: '클라우드 초기화 중...' });
+            const [syncCode, setSyncCode] = React.useState(localStorage.getItem('PE_SYNC_CODE') || 'MAIN');
+            const [showCloudModal, setShowCloudModal] = React.useState(false);
+            const [inputSyncCode, setInputSyncCode] = React.useState('');
+            const [showCustomConfigInput, setShowCustomConfigInput] = React.useState(true);
+            const [customConfigText, setCustomConfigText] = React.useState(localStorage.getItem('PE_FIREBASE_CONFIG') || '');
+
+            const isRemoteUpdateRef = React.useRef(false);
+
+            React.useEffect(() => {
+                const checkBridge = () => {
+                    if (window.PE_CLOUD) {
+                        window.PE_CLOUD.init(
+                            (remoteDb) => {
+                                isRemoteUpdateRef.current = true;
+                                setDb(remoteDb);
+                            },
+                            (statusState, statusMsg) => {
+                                setCloudStatus({ state: statusState, msg: statusMsg });
+                            }
+                        );
+                    } else {
+                        setTimeout(checkBridge, 200);
+                    }
+                };
+                checkBridge();
+            }, []);
+
+            React.useEffect(() => {
+                localStorage.setItem('PE_MASTER_DB_V3', JSON.stringify(db));
+
+                if (isRemoteUpdateRef.current) {
+                    isRemoteUpdateRef.current = false;
+                    return;
+                }
+
+                if (window.PE_CLOUD && window.PE_CLOUD.saveToCloud) {
+                    window.PE_CLOUD.saveToCloud(db);
+                }
+            }, [db]);
+
+            const [currentView, setCurrentView] = React.useState('TODAY'); // TODAY, DASHBOARD, CURRICULUM, MEMO_LOG, IMPORT, EQUIPMENT, AI_HELPER, SETTINGS
+            const [selectedSchoolYearId, setSelectedSchoolYearId] = React.useState('sy_2026');
+            const [selectedGradeId, setSelectedGradeId] = React.useState('g_3');
+            
+            const [activePresentationLesson, setActivePresentationLesson] = React.useState(null);
+            const [presentationClass, setPresentationClass] = React.useState(null);
+            const [toast, setToast] = React.useState(null);
+
+            const showToast = (message, type = 'info') => {
+                setToast({ message, type });
+                setTimeout(() => setToast(null), 3000);
+            };
+
+            const currentGrades = db.grades.filter(g => g.schoolYearId === selectedSchoolYearId && g.active);
+            const activeGrade = currentGrades.find(g => g.id === selectedGradeId) || currentGrades[0];
+
+            const currentClasses = activeGrade 
+                ? db.classes.filter(c => c.gradeId === activeGrade.id && c.active)
+                : [];
+
+            const currentCurriculum = React.useMemo(() => {
+                if (!activeGrade) return null;
+                const curr = db.curriculums.find(c => c.id === activeGrade.curriculumId);
+                if (!curr) return null;
+                const lessonList = curr.lessons || [];
+                return {
+                    ...curr,
+                    lessons: lessonList,
+                    totalLessons: lessonList.length
+                };
+            }, [db.curriculums, activeGrade]);
+
+            const handleSetClassProgress = (classId, lessonNumber) => {
+                setDb(prev => {
+                    const updatedCursors = {
+                        ...prev.classProgressCursors,
+                        [classId]: lessonNumber
+                    };
+
+                    const updatedRecords = { ...prev.lessonRecords };
+                    Object.keys(updatedRecords).forEach(key => {
+                        if (key.startsWith(`${classId}_`)) {
+                            const lNum = parseInt(key.replace(`${classId}_`, ''), 10);
+                            if (lNum >= lessonNumber) {
+                                delete updatedRecords[key];
+                            }
+                        }
+                    });
+
+                    return {
+                        ...prev,
+                        classProgressCursors: updatedCursors,
+                        lessonRecords: updatedRecords
+                    };
+                });
+
+                const targetClass = db.classes.find(c => c.id === classId);
+                showToast(`🔄 ${targetClass?.displayName || ''}반 진도가 ${lessonNumber}차시로 변경되었습니다.`, 'info');
+            };
+
+            const handleCompleteLesson = (classObj, lesson) => {
+                const cursorKey = classObj.id;
+                const nextLessonNum = lesson.lessonNumber + 1;
+
+                const recordKey = `${classObj.id}_${lesson.lessonNumber}`;
+                const updatedRecords = {
+                    ...db.lessonRecords,
+                    [recordKey]: {
+                        status: 'COMPLETE',
+                        date: new Date().toISOString().split('T')[0],
+                        memo: db.lessonRecords[recordKey]?.memo || '',
+                        nextMemo: db.lessonRecords[recordKey]?.nextMemo || ''
+                    }
+                };
+
+                const updatedCursors = {
+                    ...db.classProgressCursors,
+                    [cursorKey]: nextLessonNum
+                };
+
+                setDb(prev => ({
+                    ...prev,
+                    lessonRecords: updatedRecords,
+                    classProgressCursors: updatedCursors
+                }));
+
+                if (typeof confetti === 'function') {
+                    confetti({ particleCount: 60, spread: 70, origin: { y: 0.8 } });
+                }
+
+                showToast(`🎉 ${classObj.displayName}반 ${lesson.lessonNumber}차시 수업을 완료했습니다!`, 'success');
+            };
+
+            const handleSaveMemo = (classId, lessonNumber, memo, nextMemo) => {
+                const recordKey = `${classId}_${lessonNumber}`;
+                const existing = db.lessonRecords[recordKey] || { status: 'IN_PROGRESS', date: new Date().toISOString().split('T')[0] };
+                
+                setDb(prev => ({
+                    ...prev,
+                    lessonRecords: {
+                        ...prev.lessonRecords,
+                        [recordKey]: {
+                            ...existing,
+                            memo,
+                            nextMemo
+                        }
+                    }
+                }));
+                showToast('📝 메모가 성공적으로 저장되었습니다.');
+            };
+
+            const handleChangeSyncCode = (newCode) => {
+                const trimmed = newCode.trim().toUpperCase();
+                if (!trimmed) return;
+                setSyncCode(trimmed);
+                if (window.PE_CLOUD && window.PE_CLOUD.subscribeToSyncCode) {
+                    window.PE_CLOUD.subscribeToSyncCode(
+                        trimmed,
+                        (remoteDb) => {
+                            isRemoteUpdateRef.current = true;
+                            setDb(remoteDb);
+                        },
+                        (statusState, statusMsg) => {
+                            setCloudStatus({ state: statusState, msg: statusMsg });
+                        }
+                    );
+                }
+                setShowCloudModal(false);
+                showToast(`☁️ 동기화 코드가 [${trimmed}](으)로 변경되어 실시간 연동됩니다.`, 'success');
+            };
+
+            return (
+                <div className="flex flex-col min-h-screen pb-12">
+                    {}
+                    <header className="bg-slate-900 text-white shadow-md sticky top-0 z-30">
+                        <div className="max-w-7xl mx-auto px-4 py-3 flex flex-wrap justify-between items-center gap-3">
+                            <div className="flex items-center gap-3">
+                                <div className="bg-sky-500 text-white p-2.5 rounded-xl shadow">
+                                    <i className="fa-solid font-bold text-xl fa-person-running"></i>
+                                </div>
+                                <div>
+                                    <h1 className="text-xl font-bold tracking-tight flex items-center gap-2">
+                                        PE Master <span className="text-xs bg-sky-600 text-white px-2 py-0.5 rounded-full font-normal">체육수업 매니저</span>
+                                    </h1>
+                                    <p className="text-xs text-slate-400">초등 체육 전담교사 전용 스마트 운영시스템</p>
+                                </div>
+                            </div>
+
+                            {/* Cloud Sync Status Indicator */}
+                            <div className="flex items-center gap-3">
+                                <button
+                                    onClick={() => {
+                                        setInputSyncCode(syncCode);
+                                        setShowCloudModal(true);
+                                    }}
+                                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-2 shadow-sm cursor-pointer ${
+                                        cloudStatus.state === 'CONNECTED'
+                                            ? 'bg-emerald-950/80 border border-emerald-500/80 text-emerald-300 hover:bg-emerald-900'
+                                            : (cloudStatus.state === 'CONNECTING' 
+                                                ? 'bg-amber-950/80 border border-amber-500/80 text-amber-300 animate-pulse'
+                                                : 'bg-slate-800 border border-slate-700 text-slate-300 hover:bg-slate-700')
+                                    }`}
+                                    title="클라우드 실시간 동기화 설정 및 코드 변경"
+                                >
+                                    <span className={`w-2.5 h-2.5 rounded-full ${
+                                        cloudStatus.state === 'CONNECTED' ? 'bg-emerald-400 animate-ping' : (cloudStatus.state === 'CONNECTING' ? 'bg-amber-400' : 'bg-slate-500')
+                                    }`}></span>
+                                    <i className="fa-solid fa-cloud"></i>
+                                    <span>{cloudStatus.state === 'CONNECTED' ? `실시간 연동 [${syncCode}]` : '클라우드 설정'}</span>
+                                </button>
+
+                                <select 
+                                    value={selectedSchoolYearId} 
+                                    onChange={(e) => setSelectedSchoolYearId(e.target.value)}
+                                    className="bg-slate-800 border border-slate-700 text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 font-semibold"
+                                >
+                                    {db.schoolYears.map(sy => (
+                                        <option key={sy.id} value={sy.id}>{sy.year}</option>
+                                    ))}
+                                </select>
+
+                                <button 
+                                    onClick={() => setCurrentView('SETTINGS')}
+                                    className="p-2.5 text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg transition cursor-pointer"
+                                    title="학년도 및 학급 설정"
+                                >
+                                    <i className="fa-solid fa-gear text-lg"></i>
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Grade Tabs Bar */}
+                        <div className="bg-slate-800/90 border-t border-slate-700 px-4">
+                            <div className="max-w-7xl mx-auto flex items-center justify-between overflow-x-auto py-1">
+                                <div className="flex gap-2">
+                                    {currentGrades.map(grade => {
+                                        const isActive = activeGrade && activeGrade.id === grade.id;
+                                        return (
+                                            <button
+                                                key={grade.id}
+                                                onClick={() => setSelectedGradeId(grade.id)}
+                                                className={`px-6 py-2.5 rounded-xl font-bold text-base transition flex items-center gap-2 whitespace-nowrap min-h-[48px] cursor-pointer ${
+                                                    isActive 
+                                                        ? 'bg-sky-500 text-white shadow-md scale-[1.02]' 
+                                                        : 'bg-slate-700/60 text-slate-300 hover:bg-slate-700 hover:text-white'
+                                                }`}
+                                            >
+                                                <i className="fa-solid fa-users-rectangle"></i>
+                                                {grade.displayName}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+
+                                <button 
+                                    onClick={() => setCurrentView('IMPORT')}
+                                    className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-xl font-semibold text-xs flex items-center gap-2 transition ml-4 shrink-0 shadow min-h-[42px] cursor-pointer"
+                                >
+                                    <i className="fa-solid fa-file-excel"></i>
+                                    <span>교육과정 가져오기</span>
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Main Navigation Bar */}
+                        <div className="bg-slate-800 border-t border-slate-700/60 px-4 overflow-x-auto">
+                            <div className="max-w-7xl mx-auto flex items-center gap-1 py-1.5">
+                                <button 
+                                    onClick={() => setCurrentView('TODAY')} 
+                                    className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 whitespace-nowrap cursor-pointer ${currentView === 'TODAY' ? 'bg-sky-500 text-white shadow' : 'text-slate-300 hover:bg-slate-700'}`}
+                                >
+                                    <i className="fa-solid fa-calendar-day"></i> 오늘의 수업
+                                </button>
+                                <button 
+                                    onClick={() => setCurrentView('DASHBOARD')} 
+                                    className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 whitespace-nowrap cursor-pointer ${currentView === 'DASHBOARD' ? 'bg-sky-500 text-white shadow' : 'text-slate-300 hover:bg-slate-700'}`}
+                                >
+                                    <i className="fa-solid fa-table-cells"></i> 전체 진도표
+                                </button>
+                                <button 
+                                    onClick={() => setCurrentView('CURRICULUM')} 
+                                    className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 whitespace-nowrap cursor-pointer ${currentView === 'CURRICULUM' ? 'bg-sky-500 text-white shadow' : 'text-slate-300 hover:bg-slate-700'}`}
+                                >
+                                    <i className="fa-solid fa-book-open"></i> 교육과정 상세
+                                </button>
+                                <button 
+                                    onClick={() => setCurrentView('MEMO_LOG')} 
+                                    className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 whitespace-nowrap cursor-pointer ${currentView === 'MEMO_LOG' ? 'bg-sky-500 text-white shadow' : 'text-slate-300 hover:bg-slate-700'}`}
+                                >
+                                    <i className="fa-solid fa-clipboard-list"></i> 수업 메모장
+                                </button>
+                                <button 
+                                    onClick={() => setCurrentView('EQUIPMENT')} 
+                                    className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 whitespace-nowrap cursor-pointer ${currentView === 'EQUIPMENT' ? 'bg-sky-500 text-white shadow' : 'text-slate-300 hover:bg-slate-700'}`}
+                                >
+                                    <i className="fa-solid fa-basketball"></i> 교구 관리
+                                </button>
+                                <button 
+                                    onClick={() => setCurrentView('AI_HELPER')} 
+                                    className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 whitespace-nowrap cursor-pointer ${currentView === 'AI_HELPER' ? 'bg-sky-500 text-white shadow' : 'text-slate-300 hover:bg-slate-700'}`}
+                                >
+                                    <i className="fa-solid fa-robot"></i> AI 수업 도우미
+                                </button>
+                            </div>
+                        </div>
+                    </header>
+
+                    {/* Toast Notification */}
+                    {toast && (
+                        <div className="fixed bottom-6 right-6 z-50 bg-slate-900 text-white px-5 py-3 rounded-2xl shadow-2xl flex items-center gap-3 border border-slate-700 animate-bounce">
+                            <i className="fa-solid fa-circle-info text-sky-400 text-lg"></i>
+                            <span className="text-sm font-bold">{toast.message}</span>
+                        </div>
+                    )}
+
+                    {/* Cloud Sync Modal */}
+                    {showCloudModal && (
+                        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+                            <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-5 border border-slate-200 max-h-[90vh] overflow-y-auto">
+                                <div className="flex justify-between items-center border-b pb-3">
+                                    <h3 className="text-xl font-bold text-slate-900 flex items-center gap-2">
+                                        <i className="fa-solid fa-cloud-arrow-up text-sky-600"></i> 실시간 클라우드 동기화 설정
+                                    </h3>
+                                    <button onClick={() => setShowCloudModal(false)} className="text-slate-400 hover:text-slate-600">
+                                        <i className="fa-solid fa-xmark text-xl"></i>
+                                    </button>
+                                </div>
+
+                                <div className="space-y-3 text-sm text-slate-600">
+                                    <p className="leading-relaxed">
+                                        동일한 <strong>[동기화 코드]</strong>를 스마트폰, 전자칠판, 데스크톱 PC에 입력하면 수초 이내에 모든 수업 진도와 메모가 실시간으로 자동 연동됩니다.
+                                    </p>
+
+                                    <div className="bg-sky-50 border border-sky-200 rounded-2xl p-4 space-y-2">
+                                        <label className="block text-xs font-bold text-sky-900">현재 기기 동기화 코드</label>
+                                        <div className="flex gap-2">
+                                            <input 
+                                                type="text" 
+                                                value={inputSyncCode}
+                                                onChange={(e) => setInputSyncCode(e.target.value.toUpperCase())}
+                                                placeholder="예: PE-2026, KIM1004"
+                                                className="flex-1 p-2.5 border rounded-xl font-black text-slate-800 text-base uppercase focus:ring-2 focus:ring-sky-500"
+                                            />
+                                            <button 
+                                                onClick={() => handleChangeSyncCode(inputSyncCode)}
+                                                className="bg-sky-600 hover:bg-sky-500 text-white font-bold px-4 py-2.5 rounded-xl text-sm transition shadow"
+                                            >
+                                                적용
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {/* GitHub Pages / Custom Deployment Firebase Settings */}
+                                    <div className="border border-slate-200 rounded-2xl p-3 bg-slate-50 space-y-2">
+                                        <button 
+                                            onClick={() => setShowCustomConfigInput(!showCustomConfigInput)}
+                                            className="w-full flex justify-between items-center text-xs font-bold text-slate-700 hover:text-sky-600"
+                                        >
+                                            <span className="flex items-center gap-1.5">
+                                                <i className="fa-solid fa-key text-amber-500"></i>
+                                                GitHub Pages / 웹서버용 Firebase Config 입력
+                                            </span>
+                                            <i className={`fa-solid ${showCustomConfigInput ? 'fa-chevron-up' : 'fa-chevron-down'}`}></i>
+                                        </button>
+
+                                        {showCustomConfigInput && (
+                                            <div className="space-y-2 pt-2 border-t border-slate-200">
+                                                <div className="bg-amber-50 border border-amber-200 text-amber-800 p-2.5 rounded-xl text-xs space-y-1">
+                                                    <p className="font-bold">💡 팁: Firebase 콘솔의 전체 코드를 통째로 붙여넣으세요!</p>
+                                                    <p className="text-amber-700">&apos;const firebaseConfig = &#123; ... &#125;;&apos; 코드를 그대로 붙여넣어도 자동으로 정제 인식됩니다.</p>
+                                                </div>
+                                                <textarea 
+                                                    rows={5}
+                                                    value={customConfigText}
+                                                    onChange={(e) => setCustomConfigText(e.target.value)}
+                                                    placeholder='Firebase 콘솔에서 복사한 전체 코드를 여기에 그대로 붙여넣으세요.'
+                                                    className="w-full p-2.5 border rounded-xl font-mono text-xs focus:ring-2 focus:ring-sky-500 bg-white"
+                                                />
+                                                <button 
+                                                    onClick={() => {
+                                                        if (window.PE_CLOUD && window.PE_CLOUD.saveCustomConfig) {
+                                                            if (window.PE_CLOUD.saveCustomConfig(customConfigText)) {
+                                                                showToast('🔑 Firebase 설정이 저장되었습니다. 연동을 재시도합니다.', 'success');
+                                                                window.PE_CLOUD.init(
+                                                                    (remoteDb) => setDb(remoteDb),
+                                                                    (st, msg) => setCloudStatus({ state: st, msg: msg })
+                                                                );
+                                                            }
+                                                        }
+                                                    }}
+                                                    className="w-full bg-slate-800 hover:bg-slate-700 text-white font-bold py-2.5 rounded-xl text-xs transition shadow cursor-pointer"
+                                                >
+                                                    Firebase Config 저장 및 클라우드 연결
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <div className="text-xs text-slate-400 space-y-1 pt-1">
+                                        <p>💡 <strong>팁:</strong> 선생님만의 비밀 동기화 코드를 정해두시면 다른 기기와 오직 선생님의 데이터만 실시간 공유됩니다.</p>
+                                        <p>🌐 접속 상태: <span className="font-bold text-slate-700">{cloudStatus.msg}</span></p>
+                                    </div>
+                                </div>
+
+                                <div className="pt-2 border-t flex justify-end">
+                                    <button 
+                                        onClick={() => setShowCloudModal(false)}
+                                        className="px-5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-sm transition"
+                                    >
+                                        닫기
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Dynamic View Router */}
+                    <main className="max-w-7xl mx-auto px-4 py-6 w-full flex-1">
+                        {currentView === 'TODAY' && (
+                            <TodayClassesView 
+                                activeGrade={activeGrade}
+                                currentClasses={currentClasses}
+                                currentCurriculum={currentCurriculum}
+                                db={db}
+                                onCompleteLesson={handleCompleteLesson}
+                                onOpenPresentation={(lesson, classObj) => {
+                                    setActivePresentationLesson(lesson);
+                                    setPresentationClass(classObj);
+                                }}
+                                onSaveMemo={handleSaveMemo}
+                                setCurrentView={setCurrentView}
+                            />
+                        )}
+
+                        {currentView === 'MEMO_LOG' && (
+                            <LessonMemoLogView 
+                                db={db}
+                                setDb={setDb}
+                                activeGrade={activeGrade}
+                                currentClasses={currentClasses}
+                                currentCurriculum={currentCurriculum}
+                                onSaveMemo={handleSaveMemo}
+                                showToast={showToast}
+                            />
+                        )}
+
+                        {currentView === 'DASHBOARD' && (
+                            <OverallDashboardView 
+                                activeGrade={activeGrade}
+                                currentClasses={currentClasses}
+                                currentCurriculum={currentCurriculum}
+                                db={db}
+                                onSetClassProgress={handleSetClassProgress}
+                                onOpenPresentation={(lesson, classObj) => {
+                                    setActivePresentationLesson(lesson);
+                                    setPresentationClass(classObj);
+                                }}
+                            />
+                        )}
+
+                        {currentView === 'CURRICULUM' && (
+                            <CurriculumDetailView 
+                                currentCurriculum={currentCurriculum}
+                                activeGrade={activeGrade}
+                                db={db}
+                                setDb={setDb}
+                                showToast={showToast}
+                            />
+                        )}
+
+                        {currentView === 'IMPORT' && (
+                            <ExcelImportView 
+                                db={db}
+                                setDb={setDb}
+                                selectedSchoolYearId={selectedSchoolYearId}
+                                currentGrades={currentGrades}
+                                showToast={showToast}
+                                onFinish={() => setCurrentView('TODAY')}
+                            />
+                        )}
+
+                        {currentView === 'EQUIPMENT' && (
+                            <EquipmentManagerView 
+                                db={db}
+                                setDb={setDb}
+                                showToast={showToast}
+                            />
+                        )}
+
+                        {currentView === 'AI_HELPER' && (
+                            <AiHelperView 
+                                currentCurriculum={currentCurriculum}
+                                currentClasses={currentClasses}
+                                db={db}
+                            />
+                        )}
+
+                        {currentView === 'SETTINGS' && (
+                            <SettingsManagerView 
+                                db={db}
+                                setDb={setDb}
+                                selectedSchoolYearId={selectedSchoolYearId}
+                                showToast={showToast}
+                            />
+                        )}
+                    </main>
+
+                    {/* Presentation View Modal for Smartboards */}
+                    {activePresentationLesson && (
+                        <PresentationModal 
+                            lesson={activePresentationLesson}
+                            classObj={presentationClass}
+                            equipmentDb={db.equipment}
+                            onClose={() => setActivePresentationLesson(null)}
+                            onComplete={() => {
+                                if (presentationClass) {
+                                    handleCompleteLesson(presentationClass, activePresentationLesson);
+                                }
+                                setActivePresentationLesson(null);
+                            }}
+                        />
+                    )}
+                </div>
+            );
+        }
+
+        function TodayClassesView({ activeGrade, currentClasses, currentCurriculum, db, onCompleteLesson, onOpenPresentation, onSaveMemo, setCurrentView }) {
+            if (!activeGrade || !currentCurriculum) {
+                return (
+                    <div className="bg-white rounded-2xl p-8 text-center shadow-sm border border-slate-200 space-y-4">
+                        <i className="fa-solid fa-folder-open text-5xl text-slate-300"></i>
+                        <h3 className="text-xl font-bold text-slate-700">연결된 교육과정이 없거나 학급 정보가 부족합니다.</h3>
+                        <p className="text-slate-500 text-sm">설정에서 학년을 추가하시거나 Excel 교육과정을 새로 업로드하여 연결해 주세요.</p>
+                        <button onClick={() => setCurrentView('IMPORT')} className="px-6 py-3 bg-sky-600 hover:bg-sky-500 text-white font-bold rounded-xl text-sm transition shadow cursor-pointer">
+                            교육과정 가져오기
+                        </button>
+                    </div>
+                );
+            }
+
+            const totalLessons = currentCurriculum.lessons ? currentCurriculum.lessons.length : 0;
+            const memoCount = Object.keys(db.lessonRecords || {}).filter(k => db.lessonRecords[k]?.memo || db.lessonRecords[k]?.nextMemo).length;
+
+            return (
+                <div className="space-y-6">
+                    <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm flex flex-wrap justify-between items-center gap-4">
+                        <div>
+                            <h2 className="text-2xl font-bold text-slate-900">{activeGrade.displayName} 오늘의 체육 수업</h2>
+                            <p className="text-slate-500 text-sm mt-1">
+                                총 {currentClasses.length}개 학급의 진행 예정 차시 정보입니다. 버튼을 클릭하여 전자칠판용 수업 모드를 열거나 완료 처리하세요.
+                            </p>
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <button
+                                onClick={() => setCurrentView('MEMO_LOG')}
+                                className="px-4 py-2.5 bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold rounded-xl transition shadow flex items-center gap-2 cursor-pointer"
+                            >
+                                <i className="fa-solid fa-clipboard-list text-sm"></i>
+                                <span>전체 수업 메모장 ({memoCount}건)</span>
+                            </button>
+                            <div className="text-right border-l border-slate-200 pl-3">
+                                <span className="text-xs text-slate-400 font-semibold block">교육과정</span>
+                                <span className="text-sm font-bold text-sky-600">{currentCurriculum.title} (총 {totalLessons}차시)</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Classes Grid */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        {currentClasses.map(cls => {
+                            const currentLessonNum = db.classProgressCursors[cls.id] || 1;
+                            const lesson = currentCurriculum.lessons.find(l => l.lessonNumber === currentLessonNum);
+                            const recordKey = `${cls.id}_${currentLessonNum}`;
+                            const record = db.lessonRecords[recordKey] || {};
+
+                            const isFinishedAll = currentLessonNum > totalLessons;
+
+                            if (isFinishedAll) {
+                                return (
+                                    <div key={cls.id} className="bg-emerald-50 rounded-2xl p-6 border border-emerald-200 shadow-sm flex flex-col justify-center items-center text-center space-y-3">
+                                        <div className="w-14 h-14 bg-emerald-500 text-white rounded-full flex items-center justify-center text-2xl font-bold shadow">
+                                            ✓
+                                        </div>
+                                        <h3 className="text-xl font-extrabold text-emerald-900">{cls.displayName}반 교육과정 완료!</h3>
+                                        <p className="text-sm text-emerald-700 font-medium">모든 {totalLessons}차시 수업을 성공적으로 마무리했습니다.</p>
+                                    </div>
+                                );
+                            }
+
+                            if (!lesson) {
+                                return (
+                                    <div key={cls.id} className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
+                                        <h3 className="text-xl font-bold text-slate-800">{cls.displayName}반</h3>
+                                        <p className="text-sm text-slate-400 mt-2">{currentLessonNum}차시 정보를 찾을 수 없습니다.</p>
+                                    </div>
+                                );
+                            }
+
+                            return (
+                                <TodayClassCard 
+                                    key={cls.id}
+                                    cls={cls}
+                                    lesson={lesson}
+                                    record={record}
+                                    totalLessons={totalLessons}
+                                    equipmentDb={db.equipment}
+                                    db={db}
+                                    currentCurriculum={currentCurriculum}
+                                    onComplete={() => onCompleteLesson(cls, lesson)}
+                                    onOpenPresentation={() => onOpenPresentation(lesson, cls)}
+                                    onSaveMemo={(memo, nextMemo) => onSaveMemo(cls.id, currentLessonNum, memo, nextMemo)}
+                                />
+                            );
+                        })}
+                    </div>
+                </div>
+            );
+        }
+
+        function TodayClassCard({ cls, lesson, record, totalLessons, equipmentDb, db, currentCurriculum, onComplete, onOpenPresentation, onSaveMemo }) {
+            const [memo, setMemo] = React.useState(record.memo || '');
+            const [nextMemo, setNextMemo] = React.useState(record.nextMemo || '');
+            const [isEditingMemo, setIsEditingMemo] = React.useState(false);
+            const [showHistory, setShowHistory] = React.useState(false);
+
+            React.useEffect(() => {
+                setMemo(record.memo || '');
+                setNextMemo(record.nextMemo || '');
+            }, [record]);
+
+            const materialsList = (lesson.materials || '').split(',').map(m => m.trim()).filter(Boolean);
+            const warnings = materialsList.map(mat => {
+                const found = equipmentDb.find(e => mat.includes(e.name) || e.name.includes(mat));
+                if (found && found.quantity < 10) {
+                    return `${found.name} 보유 부족 (${found.quantity}개)`;
+                }
+                return null;
+            }).filter(Boolean);
+
+            const previousLogs = React.useMemo(() => {
+                const prefix = `${cls.id}_`;
+                const logs = [];
+                Object.keys(db.lessonRecords || {}).forEach(key => {
+                    if (key.startsWith(prefix)) {
+                        const lNum = parseInt(key.replace(prefix, ''), 10);
+                        if (lNum < lesson.lessonNumber) {
+                            const rec = db.lessonRecords[key];
+                            if (rec && (rec.memo || rec.nextMemo)) {
+                                const prevLesson = currentCurriculum?.lessons.find(l => l.lessonNumber === lNum);
+                                logs.push({
+                                    lessonNumber: lNum,
+                                    topic: prevLesson?.topic || `${lNum}차시`,
+                                    date: rec.date,
+                                    memo: rec.memo,
+                                    nextMemo: rec.nextMemo
+                                });
+                            }
+                        }
+                    }
+                });
+                return logs.sort((a, b) => b.lessonNumber - a.lessonNumber);
+            }, [db.lessonRecords, cls.id, lesson.lessonNumber, currentCurriculum]);
+
+            return (
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm hover:shadow-md transition overflow-hidden flex flex-col justify-between">
+                    <div>
+                        <div className="bg-slate-50 px-6 py-4 border-b border-slate-100 flex justify-between items-center">
+                            <div className="flex items-center gap-3">
+                                <span className="text-2xl font-extrabold text-slate-900">{cls.displayName}반</span>
+                                <span className="bg-sky-100 text-sky-800 text-xs font-bold px-3 py-1 rounded-full">
+                                    {lesson.lessonNumber} / {totalLessons} 차시
+                                </span>
+                            </div>
+                            <span className="text-xs font-bold text-slate-400 bg-slate-200/60 px-2.5 py-1 rounded-md">
+                                {lesson.unit}
+                            </span>
+                        </div>
+
+                        <div className="p-6 space-y-4">
+                            <div>
+                                <h4 className="text-xl font-bold text-slate-900 group-hover:text-sky-600 transition">
+                                    {lesson.topic}
+                                </h4>
+                                <p className="text-sm text-slate-600 mt-1 font-medium leading-relaxed">
+                                    {lesson.objective}
+                                </p>
+                            </div>
+
+                            <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-100 space-y-1.5">
+                                <div className="flex items-center gap-2 text-xs font-bold text-slate-500">
+                                    <i className="fa-solid fa-box-archive text-sky-500"></i>
+                                    <span>필요 준비물:</span>
+                                    <span className="text-slate-800 font-semibold">{lesson.materials || '없음'}</span>
+                                </div>
+                                {warnings.map((w, idx) => (
+                                    <div key={idx} className="text-xs font-bold text-amber-600 flex items-center gap-1.5 pt-0.5">
+                                        <i className="fa-solid fa-triangle-exclamation"></i>
+                                        <span>⚠️ {w}</span>
+                                    </div>
+                                ))}
+                            </div>
+
+                            <div className="space-y-2 pt-1">
+                                {!isEditingMemo ? (
+                                    <div className="text-xs space-y-1">
+                                        {record.memo && (
+                                            <div className="text-slate-600 bg-amber-50 border border-amber-100 p-2.5 rounded-xl space-y-0.5">
+                                                <div className="font-bold text-amber-800 flex items-center gap-1">
+                                                    <i className="fa-solid fa-note-sticky text-amber-500"></i>
+                                                    <span>수업 메모:</span>
+                                                </div>
+                                                <p className="text-slate-700 font-medium pl-4">{record.memo}</p>
+                                            </div>
+                                        )}
+                                        {record.nextMemo && (
+                                            <div className="text-slate-600 bg-sky-50 border border-sky-100 p-2.5 rounded-xl space-y-0.5">
+                                                <div className="font-bold text-sky-800 flex items-center gap-1">
+                                                    <i className="fa-solid fa-bullhorn text-sky-500"></i>
+                                                    <span>다음시간 참고사항:</span>
+                                                </div>
+                                                <p className="text-slate-700 font-medium pl-4">{record.nextMemo}</p>
+                                            </div>
+                                        )}
+                                        <div className="flex justify-between items-center pt-1">
+                                            <button 
+                                                onClick={() => setIsEditingMemo(true)} 
+                                                className="text-xs font-bold text-sky-600 hover:underline inline-flex items-center gap-1 cursor-pointer"
+                                            >
+                                                <i className="fa-solid fa-pen"></i> {(record.memo || record.nextMemo) ? '수업 메모 수정' : '수업 메모 작성'}
+                                            </button>
+
+                                            {previousLogs.length > 0 && (
+                                                <button
+                                                    onClick={() => setShowHistory(!showHistory)}
+                                                    className="text-xs font-bold text-slate-500 hover:text-slate-700 flex items-center gap-1 bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-lg transition cursor-pointer"
+                                                >
+                                                    <i className="fa-solid fa-clock-rotate-left text-amber-500"></i>
+                                                    <span>이전 메모 이력 ({previousLogs.length}건)</span>
+                                                </button>
+                                            )}
+                                        </div>
+
+                                        {showHistory && previousLogs.length > 0 && (
+                                            <div className="mt-2 bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2 max-h-48 overflow-y-auto">
+                                                <div className="text-xs font-bold text-slate-500 border-b pb-1 flex justify-between">
+                                                    <span>📜 {cls.displayName}반 이전 차시 기록</span>
+                                                    <button onClick={() => setShowHistory(false)} className="text-slate-400 hover:text-slate-600">닫기</button>
+                                                </div>
+                                                {previousLogs.map((log, i) => (
+                                                    <div key={i} className="text-xs bg-white p-2 rounded-lg border border-slate-100 space-y-1">
+                                                        <div className="flex justify-between font-bold text-slate-700">
+                                                            <span>{log.lessonNumber}차시 - {log.topic}</span>
+                                                            <span className="text-slate-400 font-normal">{log.date || ''}</span>
+                                                        </div>
+                                                        {log.memo && <p className="text-amber-800">📌 메모: {log.memo}</p>}
+                                                        {log.nextMemo && <p className="text-sky-800">💡 다음참고: {log.nextMemo}</p>}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                ) : (
+                                    <div className="space-y-2 bg-slate-50 p-3 rounded-xl border">
+                                        <div>
+                                            <label className="block text-xs font-bold text-slate-600 mb-0.5">이번 수업 기록 메모</label>
+                                            <input 
+                                                type="text" 
+                                                placeholder="예: 공 부족으로 2인 1조 진행 / 학생 반응 최고" 
+                                                value={memo}
+                                                onChange={(e) => setMemo(e.target.value)}
+                                                className="w-full text-xs p-2 border rounded-lg font-medium"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-bold text-slate-600 mb-0.5">다음 시간 참고사항</label>
+                                            <input 
+                                                type="text" 
+                                                placeholder="예: 수업 시작 전 던지기 동작 복습 필요" 
+                                                value={nextMemo}
+                                                onChange={(e) => setNextMemo(e.target.value)}
+                                                className="w-full text-xs p-2 border rounded-lg font-medium"
+                                            />
+                                        </div>
+                                        <div className="flex justify-end gap-2 pt-1">
+                                            <button 
+                                                onClick={() => setIsEditingMemo(false)} 
+                                                className="px-2.5 py-1 text-xs font-bold text-slate-500"
+                                            >
+                                                취소
+                                            </button>
+                                            <button 
+                                                onClick={() => {
+                                                    onSaveMemo(memo, nextMemo);
+                                                    setIsEditingMemo(false);
+                                                }} 
+                                                className="px-3.5 py-1.5 bg-sky-600 text-white rounded-lg text-xs font-bold hover:bg-sky-500 shadow-sm cursor-pointer"
+                                            >
+                                                저장
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="p-4 bg-slate-50 border-t border-slate-100 flex gap-3">
+                        <button 
+                            onClick={onOpenPresentation}
+                            className="flex-1 min-h-[52px] bg-slate-800 hover:bg-slate-700 active:scale-[0.98] text-white font-bold rounded-xl text-sm flex items-center justify-center gap-2 transition shadow-sm cursor-pointer"
+                        >
+                            <i className="fa-solid fa-desktop text-base text-sky-400"></i>
+                            <span>수업 화면 (전자칠판)</span>
+                        </button>
+                        
+                        <button 
+                            onClick={onComplete}
+                            className="flex-1 min-h-[52px] bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] text-white font-extrabold rounded-xl text-base flex items-center justify-center gap-2 transition shadow-md cursor-pointer"
+                        >
+                            <i className="fa-solid fa-circle-check text-lg"></i>
+                            <span>수업 완료</span>
+                        </button>
+                    </div>
+                </div>
+            );
+        }
+
+        function LessonMemoLogView({ db, setDb, activeGrade, currentClasses, currentCurriculum, onSaveMemo, showToast }) {
+            const [filterClassId, setFilterClassId] = React.useState('ALL');
+            const [searchQuery, setSearchQuery] = React.useState('');
+            const [editingKey, setEditingKey] = React.useState(null);
+            const [editMemoText, setEditMemoText] = React.useState('');
+            const [editNextMemoText, setEditNextMemoText] = React.useState('');
+
+            const memoList = React.useMemo(() => {
+                const list = [];
+                Object.entries(db.lessonRecords || {}).forEach(([key, record]) => {
+                    if (!record || (!record.memo && !record.nextMemo)) return;
+
+                    const parts = key.split('_');
+                    if (parts.length < 3) return;
+
+                    const lessonNum = parseInt(parts[2], 10);
+                    const classId = `${parts[0]}_${parts[1]}_${parts[2]}` ? key.substring(0, key.lastIndexOf('_')) : '';
+                    
+                    const classObj = db.classes.find(c => c.id === classId);
+                    if (!classObj) return;
+
+                    const gradeObj = db.grades.find(g => g.id === classObj.gradeId);
+                    if (activeGrade && gradeObj && gradeObj.id !== activeGrade.id) return;
+
+                    if (filterClassId !== 'ALL' && classId !== filterClassId) return;
+
+                    const curr = db.curriculums.find(c => c.id === gradeObj?.curriculumId) || currentCurriculum;
+                    const lessonObj = curr?.lessons?.find(l => l.lessonNumber === lessonNum);
+
+                    if (searchQuery.trim()) {
+                        const q = searchQuery.toLowerCase();
+                        const matchText = `${classObj.displayName} ${lessonNum}차시 ${lessonObj?.topic || ''} ${record.memo || ''} ${record.nextMemo || ''}`.toLowerCase();
+                        if (!matchText.includes(q)) return;
+                    }
+
+                    list.push({
+                        recordKey: key,
+                        classId: classId,
+                        className: classObj.displayName,
+                        lessonNumber: lessonNum,
+                        unit: lessonObj?.unit || '-',
+                        topic: lessonObj?.topic || `${lessonNum}차시 수업`,
+                        date: record.date || '-',
+                        memo: record.memo || '',
+                        nextMemo: record.nextMemo || '',
+                        status: record.status
+                    });
+                });
+
+                return list.sort((a, b) => {
+                    if (a.className !== b.className) return a.className.localeCompare(b.className);
+                    return b.lessonNumber - a.lessonNumber;
+                });
+            }, [db.lessonRecords, db.classes, db.grades, activeGrade, filterClassId, searchQuery, currentCurriculum]);
+
+            const handleDeleteMemo = (recordKey) => {
+                const updatedRecords = { ...db.lessonRecords };
+                if (updatedRecords[recordKey]) {
+                    updatedRecords[recordKey] = {
+                        ...updatedRecords[recordKey],
+                        memo: '',
+                        nextMemo: ''
+                    };
+                }
+                setDb(prev => ({ ...prev, lessonRecords: updatedRecords }));
+                showToast('🗑️ 수업 메모가 삭제되었습니다.');
+            };
+
+            const handleSaveEdit = (recordKey, classId, lessonNum) => {
+                onSaveMemo(classId, lessonNum, editMemoText, editNextMemoText);
+                setEditingKey(null);
+            };
+
+            return (
+                <div className="space-y-6 max-w-5xl mx-auto">
+                    <div className="bg-gradient-to-r from-amber-500 to-orange-600 rounded-2xl p-6 text-white shadow-md flex flex-wrap justify-between items-center gap-4">
+                        <div>
+                            <h2 className="text-2xl font-bold flex items-center gap-2">
+                                <i className="fa-solid fa-clipboard-list"></i> {activeGrade?.displayName || ''} 수업 메모장 & 이력 모아보기
+                            </h2>
+                            <p className="text-amber-100 text-sm mt-1">
+                                수업 진행 중 기록한 이번 차시 메모 및 다음 시간 참고사항을 한눈에 조회·관리합니다.
+                            </p>
+                        </div>
+                        <div className="bg-white/20 backdrop-blur-md px-4 py-2 rounded-xl text-center">
+                            <span className="text-xs font-medium block">총 작성된 메모</span>
+                            <span className="text-2xl font-black">{memoList.length}건</span>
+                        </div>
+                    </div>
+
+                    <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                            <label className="text-xs font-bold text-slate-500 whitespace-nowrap">학급 필터:</label>
+                            <select 
+                                value={filterClassId} 
+                                onChange={(e) => setFilterClassId(e.target.value)}
+                                className="p-2 border rounded-xl font-bold text-sm bg-slate-50 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                            >
+                                <option value="ALL">전체 학급 보기</option>
+                                {currentClasses.map(c => (
+                                    <option key={c.id} value={c.id}>{c.displayName}반</option>
+                                ))}
+                            </select>
+                        </div>
+
+                        <div className="flex-1 min-w-[240px] max-w-md relative">
+                            <i className="fa-solid fa-magnifying-glass absolute left-3.5 top-3 text-slate-400 text-sm"></i>
+                            <input 
+                                type="text" 
+                                placeholder="메모 내용 또는 수업 주제 검색..." 
+                                value={searchQuery}
+                                onChange={(e) => setSearchQuery(e.target.value)}
+                                className="w-full pl-9 pr-3 py-2 border rounded-xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-amber-500"
+                            />
+                        </div>
+                    </div>
+
+                    {memoList.length === 0 ? (
+                        <div className="bg-white rounded-2xl p-12 text-center border border-slate-200 shadow-sm space-y-3">
+                            <div className="w-16 h-16 bg-amber-50 text-amber-500 rounded-full flex items-center justify-center text-3xl mx-auto">
+                                <i className="fa-solid fa-note-sticky"></i>
+                            </div>
+                            <h3 className="text-lg font-bold text-slate-700">작성된 수업 메모가 없습니다.</h3>
+                            <p className="text-slate-400 text-sm">
+                                [오늘의 수업] 카드에서 수업 완료 시 작성하시거나, 메모 입력 창에서 자유롭게 적어두세요.
+                            </p>
+                        </div>
+                    ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            {memoList.map((item) => {
+                                const isEditing = editingKey === item.recordKey;
+
+                                return (
+                                    <div key={item.recordKey} className="bg-white rounded-2xl border border-slate-200 shadow-sm hover:shadow-md transition p-5 space-y-3 flex flex-col justify-between">
+                                        <div className="space-y-3">
+                                            <div className="flex justify-between items-center border-b border-slate-100 pb-2.5">
+                                                <div className="flex items-center gap-2">
+                                                    <span className="bg-amber-500 text-white font-extrabold text-xs px-2.5 py-1 rounded-lg">
+                                                        {item.className}반
+                                                    </span>
+                                                    <span className="font-extrabold text-slate-800 text-base">
+                                                        {item.lessonNumber}차시
+                                                    </span>
+                                                    <span className="text-xs font-semibold text-slate-400 bg-slate-100 px-2 py-0.5 rounded">
+                                                        {item.unit}
+                                                    </span>
+                                                </div>
+                                                <span className="text-xs font-medium text-slate-400 flex items-center gap-1">
+                                                    <i className="fa-regular fa-calendar"></i> {item.date}
+                                                </span>
+                                            </div>
+
+                                            <div>
+                                                <h4 className="font-bold text-slate-900 text-base">{item.topic}</h4>
+                                            </div>
+
+                                            {!isEditing ? (
+                                                <div className="space-y-2 text-xs">
+                                                    {item.memo && (
+                                                        <div className="bg-amber-50 border border-amber-100 p-3 rounded-xl space-y-1">
+                                                            <div className="font-bold text-amber-900 flex items-center gap-1.5">
+                                                                <i className="fa-solid fa-pen-to-square text-amber-500"></i>
+                                                                <span>수업 메모:</span>
+                                                            </div>
+                                                            <p className="text-slate-700 font-medium pl-4 leading-relaxed whitespace-pre-line">{item.memo}</p>
+                                                        </div>
+                                                    )}
+                                                    {item.nextMemo && (
+                                                        <div className="bg-sky-50 border border-sky-100 p-3 rounded-xl space-y-1">
+                                                            <div className="font-bold text-sky-900 flex items-center gap-1.5">
+                                                                <i className="fa-solid fa-lightbulb text-sky-500"></i>
+                                                                <span>다음 시간 참고사항:</span>
+                                                            </div>
+                                                            <p className="text-slate-700 font-medium pl-4 leading-relaxed whitespace-pre-line">{item.nextMemo}</p>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ) : (
+                                                <div className="space-y-2 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                                                    <div>
+                                                        <label className="block text-xs font-bold text-slate-600 mb-1">수업 메모</label>
+                                                        <input 
+                                                            type="text" 
+                                                            value={editMemoText}
+                                                            onChange={(e) => setEditMemoText(e.target.value)}
+                                                            className="w-full text-xs p-2 border rounded-lg font-medium"
+                                                        />
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-xs font-bold text-slate-600 mb-1">다음 시간 참고사항</label>
+                                                        <input 
+                                                            type="text" 
+                                                            value={editNextMemoText}
+                                                            onChange={(e) => setEditNextMemoText(e.target.value)}
+                                                            className="w-full text-xs p-2 border rounded-lg font-medium"
+                                                        />
+                                                    </div>
+                                                    <div className="flex justify-end gap-2 pt-1">
+                                                        <button 
+                                                            onClick={() => setEditingKey(null)} 
+                                                            className="px-3 py-1 text-xs font-bold text-slate-500"
+                                                        >
+                                                            취소
+                                                        </button>
+                                                        <button 
+                                                            onClick={() => handleSaveEdit(item.recordKey, item.classId, item.lessonNumber)} 
+                                                            className="px-3.5 py-1 bg-amber-600 text-white rounded-lg text-xs font-bold hover:bg-amber-500 cursor-pointer"
+                                                        >
+                                                            저장
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        {!isEditing && (
+                                            <div className="pt-2 border-t border-slate-100 flex justify-end gap-2">
+                                                <button 
+                                                    onClick={() => {
+                                                        setEditingKey(item.recordKey);
+                                                        setEditMemoText(item.memo);
+                                                        setEditNextMemoText(item.nextMemo);
+                                                    }}
+                                                    className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg transition cursor-pointer"
+                                                >
+                                                    <i className="fa-solid fa-pen text-sky-500"></i> 수정
+                                                </button>
+                                                <button 
+                                                    onClick={() => handleDeleteMemo(item.recordKey)}
+                                                    className="px-3 py-1 bg-rose-50 hover:bg-rose-100 text-rose-600 text-xs font-bold rounded-lg transition cursor-pointer"
+                                                >
+                                                    <i className="fa-solid fa-trash-can"></i> 삭제
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        function PresentationModal({ lesson, classObj, equipmentDb, onClose, onComplete }) {
+            return (
+                <div className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4 sm:p-8">
+                    <div className="bg-slate-900 border border-slate-800 text-white rounded-3xl w-full max-w-6xl max-h-[92vh] overflow-y-auto shadow-2xl flex flex-col justify-between">
+                        <div className="bg-slate-850 px-8 py-6 border-b border-slate-800 flex justify-between items-center sticky top-0 z-10">
+                            <div>
+                                <div className="flex items-center gap-3">
+                                    <span className="bg-sky-500 text-white font-extrabold px-4 py-1.5 rounded-full text-base">
+                                        {classObj ? `${classObj.displayName}반` : '체육 수업'}
+                                    </span>
+                                    <span className="text-sky-400 text-xl font-bold">{lesson.lessonNumber}차시</span>
+                                    <span className="text-slate-400 text-base">{lesson.unit}</span>
+                                </div>
+                                <h1 className="presentation-title font-black text-white mt-2 tracking-tight">
+                                    {lesson.topic}
+                                </h1>
+                            </div>
+                            <button 
+                                onClick={onClose}
+                                className="w-14 h-14 bg-slate-800 hover:bg-slate-700 rounded-2xl flex items-center justify-center text-slate-300 hover:text-white transition cursor-pointer"
+                            >
+                                <i className="fa-solid fa-xmark text-2xl"></i>
+                            </button>
+                        </div>
+
+                        <div className="p-8 space-y-8">
+                            <div className="bg-sky-950/50 border border-sky-800/80 rounded-2xl p-6 shadow-inner space-y-2">
+                                <div className="flex items-center gap-2 text-sky-400 font-extrabold text-lg">
+                                    <i className="fa-solid fa-bullseye text-xl"></i>
+                                    <span>오늘의 학습 목표</span>
+                                </div>
+                                <p className="presentation-body font-bold text-sky-100 leading-relaxed">
+                                    {lesson.objective}
+                                </p>
+                            </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div className="bg-slate-800/70 border border-slate-700/80 rounded-2xl p-6 space-y-3">
+                                    <div className="flex items-center gap-2 text-emerald-400 font-extrabold text-lg">
+                                        <i className="fa-solid fa-person-running text-xl"></i>
+                                        <span>핵심 교수·학습 활동</span>
+                                    </div>
+                                    <div className="presentation-body text-slate-200 whitespace-pre-line font-medium leading-relaxed">
+                                        {lesson.mainActivity || '기초 체력 운동 및 본 활동 연습 진행'}
+                                    </div>
+                                </div>
+
+                                <div className="bg-slate-800/70 border border-slate-700/80 rounded-2xl p-6 space-y-3">
+                                    <div className="flex items-center gap-2 text-amber-400 font-extrabold text-lg">
+                                        <i className="fa-solid fa-gamepad text-xl"></i>
+                                        <span>게임 & 표현 활동</span>
+                                    </div>
+                                    <div className="presentation-body text-slate-200 font-medium leading-relaxed">
+                                        {lesson.gameActivity || '본 차시 규칙 적용 게임 및 모둠 활동'}
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div className="bg-slate-800/40 border border-slate-700/50 rounded-2xl p-6 space-y-2">
+                                    <div className="flex items-center gap-2 text-purple-400 font-bold text-base">
+                                        <i className="fa-solid fa-box-open"></i>
+                                        <span>준비물 및 교구</span>
+                                    </div>
+                                    <p className="text-xl font-bold text-slate-200">{lesson.materials || '기본 교구'}</p>
+                                </div>
+
+                                <div className="bg-slate-800/40 border border-slate-700/50 rounded-2xl p-6 space-y-2">
+                                    <div className="flex items-center gap-2 text-rose-400 font-bold text-base">
+                                        <i className="fa-solid fa-clipboard-check"></i>
+                                        <span>평가 기준</span>
+                                    </div>
+                                    <p className="text-base font-semibold text-slate-300">{lesson.assessment || '규칙 준수 및 협동 태도'}</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="bg-slate-850 px-8 py-6 border-t border-slate-800 flex flex-wrap justify-between items-center gap-4 sticky bottom-0">
+                            <button 
+                                onClick={onClose}
+                                className="px-8 py-4 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-lg rounded-2xl transition cursor-pointer"
+                            >
+                                닫기
+                            </button>
+
+                            {classObj && (
+                                <button 
+                                    onClick={onComplete}
+                                    className="px-10 py-5 bg-emerald-600 hover:bg-emerald-500 text-white font-black text-2xl rounded-2xl shadow-xl transition transform active:scale-95 flex items-center gap-3 cursor-pointer"
+                                >
+                                    <i className="fa-solid fa-circle-check text-3xl"></i>
+                                    <span>수업 완료 기록하기</span>
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        function OverallDashboardView({ activeGrade, currentClasses, currentCurriculum, db, onSetClassProgress, onOpenPresentation }) {
+            if (!currentCurriculum) return null;
+
+            const totalLessons = currentCurriculum.lessons ? currentCurriculum.lessons.length : 0;
+
+            return (
+                <div className="space-y-6">
+                    <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
+                        <h2 className="text-2xl font-bold text-slate-900 mb-2">
+                            {activeGrade.displayName} 전체 학급 진도 대시보드
+                        </h2>
+                        <p className="text-slate-500 text-sm">
+                            각 반별 현재 차시 달성률 및 차시별 상태를 관제합니다. (전체 {totalLessons}차시)
+                        </p>
+                    </div>
+
+                    <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-5">
+                        <h3 className="text-lg font-bold text-slate-800 mb-4">반별 진도 요약</h3>
+                        {currentClasses.map(cls => {
+                            const currentLessonNum = Math.min(db.classProgressCursors[cls.id] || 1, totalLessons + 1);
+                            const completedCount = Math.max(0, currentLessonNum - 1);
+                            const percent = totalLessons > 0 ? Math.min(100, Math.round((completedCount / totalLessons) * 100)) : 0;
+
+                            return (
+                                <div key={cls.id} className="space-y-2">
+                                    <div className="flex justify-between items-center text-sm font-bold">
+                                        <span className="text-base text-slate-800">{cls.displayName}반</span>
+                                        <span className="text-sky-600">
+                                            {currentLessonNum <= totalLessons ? `현재 ${currentLessonNum} / ${totalLessons}차시 진행 중` : `완료 (${totalLessons}/${totalLessons}차시)`}
+                                            <span className="text-xs text-slate-400 font-normal ml-2">({completedCount}차시 완료, {percent}%)</span>
+                                        </span>
+                                    </div>
+                                    <div className="w-full bg-slate-100 rounded-full h-4 overflow-hidden border border-slate-200">
+                                        <div 
+                                            className="bg-sky-500 h-full rounded-full transition-all duration-500"
+                                            style={{ width: `${percent}%` }}
+                                        ></div>
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+
+                    <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm overflow-x-auto">
+                        <h3 className="text-lg font-bold text-slate-800 mb-4 flex flex-wrap justify-between items-center gap-2">
+                            <span>전체 차시 현황 매트릭스</span>
+                            <span className="text-xs font-normal text-slate-500 bg-slate-100 px-3 py-1 rounded-lg">💡 ✓ 클릭 시 진도 해제 | • 클릭 시 해당 차시로 지정</span>
+                        </h3>
+                        <table className="w-full text-left border-collapse min-w-[700px]">
+                            <thead>
+                                <tr className="border-b border-slate-200 bg-slate-50">
+                                    <th className="p-3 text-xs font-bold text-slate-500 w-16">차시</th>
+                                    <th className="p-3 text-xs font-bold text-slate-500">주제</th>
+                                    {currentClasses.map(cls => (
+                                        <th key={cls.id} className="p-3 text-xs font-bold text-slate-700 text-center">{cls.displayName}</th>
+                                    ))}
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {currentCurriculum.lessons.map(lesson => (
+                                    <tr key={lesson.id} className="border-b border-slate-100 hover:bg-slate-50/80 transition">
+                                        <td className="p-3 font-bold text-slate-600 text-sm">{lesson.lessonNumber}</td>
+                                        <td className="p-3 font-medium text-slate-800 text-sm">
+                                            <button 
+                                                onClick={() => onOpenPresentation(lesson, null)}
+                                                className="hover:text-sky-600 text-left font-semibold cursor-pointer"
+                                            >
+                                                {lesson.topic}
+                                            </button>
+                                        </td>
+                                        {currentClasses.map(cls => {
+                                            const currentCursor = db.classProgressCursors[cls.id] || 1;
+                                            const isDone = lesson.lessonNumber < currentCursor;
+                                            const isCurrent = lesson.lessonNumber === currentCursor;
+
+                                            return (
+                                                <td key={cls.id} className="p-3 text-center">
+                                                    {isDone && (
+                                                        <button
+                                                            onClick={() => onSetClassProgress(cls.id, lesson.lessonNumber)}
+                                                            className="inline-flex items-center justify-center w-8 h-8 bg-emerald-100 hover:bg-rose-100 text-emerald-700 hover:text-rose-600 rounded-full text-xs font-bold transition shadow-sm border border-emerald-300 hover:border-rose-300 group cursor-pointer"
+                                                            title={`${cls.displayName}반 ${lesson.lessonNumber}차시로 진도 되돌리기`}
+                                                        >
+                                                            <span className="group-hover:hidden">✓</span>
+                                                            <span className="hidden group-hover:inline"><i className="fa-solid fa-rotate-left"></i></span>
+                                                        </button>
+                                                    )}
+                                                    {isCurrent && (
+                                                        <button
+                                                            onClick={() => onSetClassProgress(cls.id, Math.max(1, lesson.lessonNumber - 1))}
+                                                            className="inline-block px-2.5 py-1 bg-sky-500 hover:bg-sky-600 text-white rounded-md text-xs font-bold shadow-sm transition active:scale-95 cursor-pointer"
+                                                            title="이전 차시로 되돌리기"
+                                                        >
+                                                            진행중
+                                                        </button>
+                                                    )}
+                                                    {!isDone && !isCurrent && (
+                                                        <button
+                                                            onClick={() => onSetClassProgress(cls.id, lesson.lessonNumber)}
+                                                            className="inline-block w-7 h-7 text-slate-300 hover:text-sky-600 hover:bg-sky-50 rounded-full text-xs font-bold transition cursor-pointer"
+                                                            title={`${cls.displayName}반 ${lesson.lessonNumber}차시로 진도 변경`}
+                                                        >
+                                                            •
+                                                        </button>
+                                                    )}
+                                                </td>
+                                            );
+                                        })}
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            );
+        }
+
+        function CurriculumDetailView({ currentCurriculum, activeGrade, db, setDb, showToast }) {
+            const [selectedLesson, setSelectedLesson] = React.useState(null);
+
+            if (!currentCurriculum) {
+                return <div className="p-8 text-center text-slate-500">연결된 교육과정이 없습니다.</div>;
+            }
+
+            const totalLessons = currentCurriculum.lessons ? currentCurriculum.lessons.length : 0;
+
+            const handleUpdateLesson = (updatedLesson) => {
+                const updatedLessons = currentCurriculum.lessons.map(l => 
+                    l.id === updatedLesson.id ? updatedLesson : l
+                );
+
+                const updatedCurriculums = db.curriculums.map(c => 
+                    c.id === currentCurriculum.id ? { ...c, lessons: updatedLessons } : c
+                );
+
+                setDb(prev => ({ ...prev, curriculums: updatedCurriculums }));
+                showToast('✅ 차시 정보가 수정되었습니다.');
+                setSelectedLesson(null);
+            };
+
+            return (
+                <div className="space-y-6">
+                    <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm flex justify-between items-center">
+                        <div>
+                            <h2 className="text-2xl font-bold text-slate-900">{currentCurriculum.title}</h2>
+                            <p className="text-slate-500 text-sm mt-0.5">
+                                학년: {activeGrade?.displayName} | 총 {totalLessons}개 차시
+                            </p>
+                        </div>
+                    </div>
+
+                    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-left border-collapse">
+                                <thead className="bg-slate-50 border-b border-slate-200 text-xs font-bold text-slate-500">
+                                    <tr>
+                                        <th className="p-4 w-16">차시</th>
+                                        <th className="p-4">단원</th>
+                                        <th className="p-4">소주제</th>
+                                        <th className="p-4">준비물</th>
+                                        <th className="p-4 text-center">수정</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100 text-sm">
+                                    {currentCurriculum.lessons.map(lesson => (
+                                        <tr key={lesson.id} className="hover:bg-slate-50 transition">
+                                            <td className="p-4 font-bold text-sky-600">{lesson.lessonNumber}</td>
+                                            <td className="p-4 text-slate-600 font-medium">{lesson.unit}</td>
+                                            <td className="p-4 text-slate-900 font-bold">{lesson.topic}</td>
+                                            <td className="p-4 text-slate-600">{lesson.materials || '-'}</td>
+                                            <td className="p-4 text-center">
+                                                <button 
+                                                    onClick={() => setSelectedLesson(lesson)}
+                                                    className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition cursor-pointer"
+                                                >
+                                                    편집
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    {selectedLesson && (
+                        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+                            <div className="bg-white rounded-2xl max-w-2xl w-full p-6 shadow-2xl max-h-[90vh] overflow-y-auto space-y-4">
+                                <div className="flex justify-between items-center border-b pb-3">
+                                    <h3 className="text-lg font-bold">{selectedLesson.lessonNumber}차시 편집</h3>
+                                    <button onClick={() => setSelectedLesson(null)} className="text-slate-400 hover:text-slate-600">
+                                        <i className="fa-solid fa-xmark text-xl"></i>
+                                    </button>
+                                </div>
+
+                                <form onSubmit={(e) => {
+                                    e.preventDefault();
+                                    const formData = new FormData(e.target);
+                                    handleUpdateLesson({
+                                        ...selectedLesson,
+                                        unit: formData.get('unit'),
+                                        topic: formData.get('topic'),
+                                        objective: formData.get('objective'),
+                                        mainActivity: formData.get('mainActivity'),
+                                        gameActivity: formData.get('gameActivity'),
+                                        materials: formData.get('materials')
+                                    });
+                                }} className="space-y-3 text-sm">
+                                    <div>
+                                        <label className="block font-bold text-slate-700 mb-1">단원</label>
+                                        <input name="unit" defaultValue={selectedLesson.unit} className="w-full p-2 border rounded-lg" />
+                                    </div>
+                                    <div>
+                                        <label className="block font-bold text-slate-700 mb-1">소주제 (차시명)</label>
+                                        <input name="topic" defaultValue={selectedLesson.topic} className="w-full p-2 border rounded-lg" />
+                                    </div>
+                                    <div>
+                                        <label className="block font-bold text-slate-700 mb-1">차시 목표</label>
+                                        <textarea name="objective" defaultValue={selectedLesson.objective} className="w-full p-2 border rounded-lg" rows={2} />
+                                    </div>
+                                    <div>
+                                        <label className="block font-bold text-slate-700 mb-1">핵심 활동</label>
+                                        <textarea name="mainActivity" defaultValue={selectedLesson.mainActivity} className="w-full p-2 border rounded-lg" rows={3} />
+                                    </div>
+                                    <div>
+                                        <label className="block font-bold text-slate-700 mb-1">준비물</label>
+                                        <input name="materials" defaultValue={selectedLesson.materials} className="w-full p-2 border rounded-lg" />
+                                    </div>
+
+                                    <div className="pt-3 flex justify-end gap-2">
+                                        <button type="button" onClick={() => setSelectedLesson(null)} className="px-4 py-2 border rounded-lg font-bold text-slate-600">취소</button>
+                                        <button type="submit" className="px-5 py-2 bg-sky-600 text-white rounded-lg font-bold hover:bg-sky-500 cursor-pointer">저장</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        function ExcelImportView({ db, setDb, selectedSchoolYearId, currentGrades, showToast, onFinish }) {
+            const [step, setStep] = React.useState(1);
+            const [rawHeaders, setRawHeaders] = React.useState([]);
+            const [parsedData, setParsedData] = React.useState([]);
+            const [selectedGradeId, setSelectedGradeId] = React.useState(currentGrades[0]?.id || '');
+
+            const TARGET_FIELDS = [
+                { key: 'lessonNumber', name: '차시 번호', required: true, aliases: ['차시', '차시번호', '회차', '주', '번호', 'lesson', 'no', '차시(회차)'] },
+                { key: 'unit', name: '단원', required: false, aliases: ['단원', '대단원', '중단원', '소단원', '영역', '영역명', '내용영역', '구분', 'unit'] },
+                { key: 'topic', name: '소주제 (차시명)', required: true, aliases: ['소주제', '학습주제', '차시명', '제제', '제제명', '본시주제', '활동명', '주제', '제목', 'topic'] },
+                { key: 'objective', name: '차시 목표', required: false, aliases: ['차시 목표', '학습목표', '본시목표', '성취기준', '목표', 'objective'] },
+                { key: 'mainActivity', name: '핵심 활동', required: false, aliases: ['핵심 활동', '교수학습활동', '교수·학습 내용', '주요활동', '본활동', '수업내용', '활동내용', '활동', 'activity'] },
+                { key: 'gameActivity', name: '게임/표현 활동', required: false, aliases: ['게임/표현 활동', '게임·표현활동', '간이게임', '놀이', '표현', '신체활동', '게임'] },
+                { key: 'materials', name: '준비물', required: false, aliases: ['준비물', '준비물 및 교구', '학습준비물', '필요교구', '준비물(교구)', '기구', '교구', 'materials', 'material'] },
+                { key: 'assessment', name: '평가 포인트', required: false, aliases: ['평가 포인트', '평가계획', '평가기준', '관점', '평가방법', '관점평가', '평가', 'assessment'] },
+                { key: 'edutech', name: '에듀테크/AI 아이디어', required: false, aliases: ['에듀테크/AI 아이디어', '에듀테크 활용', '에듀테크', 'ict', '디지털', 'ai', 'edutech'] }
+            ];
+
+            const [columnMapping, setColumnMapping] = React.useState({});
+
+            const handleFileUpload = (file) => {
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    const firstSheetName = workbook.SheetNames[0];
+                    const worksheet = workbook.Sheets[firstSheetName];
+                    
+                    const json = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+
+                    if (json.length > 0) {
+                        let bestHeaderIdx = 0;
+                        let maxMatches = -1;
+
+                        const keywords = ['차시', '단원', '주제', '목표', '활동', '준비물', '평가', '에듀테크', 'lesson', 'unit', 'topic', 'objective'];
+
+                        json.slice(0, 10).forEach((row, idx) => {
+                            if (!Array.isArray(row)) return;
+                            const rowStr = row.map(c => String(c || '').toLowerCase()).join(' ');
+                            let matchCount = 0;
+                            keywords.forEach(kw => {
+                                if (rowStr.includes(kw)) matchCount++;
+                            });
+                            if (matchCount > maxMatches && matchCount > 0) {
+                                maxMatches = matchCount;
+                                bestHeaderIdx = idx;
+                            }
+                        });
+
+                        const headers = json[bestHeaderIdx].map(h => String(h || '').trim());
+                        
+                        const rawRows = json.slice(bestHeaderIdx + 1);
+                        const rows = rawRows.filter(r => 
+                            Array.isArray(r) && r.some(cell => cell !== null && cell !== undefined && String(cell).trim() !== '')
+                        );
+
+                        setRawHeaders(headers);
+                        setParsedData(rows);
+
+                        // Intelligent Multi-Alias Matching Logic
+                        const initialMapping = {};
+                        const usedHeaders = new Set();
+
+                        TARGET_FIELDS.forEach(field => {
+                            let matchedHeader = '';
+                            
+                            // 1st Priority: Exact or Alias match
+                            for (const alias of field.aliases) {
+                                const found = headers.find(h => {
+                                    if (usedHeaders.has(h)) return false;
+                                    const cleanedHeader = h.toLowerCase().replace(/[\s\-_·\/()[\]]/g, '');
+                                    const cleanedAlias = alias.toLowerCase().replace(/[\s\-_·\/()[\]]/g, '');
+                                    return cleanedHeader === cleanedAlias || cleanedHeader.includes(cleanedAlias) || cleanedAlias.includes(cleanedHeader);
+                                });
+                                if (found) {
+                                    matchedHeader = found;
+                                    break;
+                                }
+                            }
+
+                            if (matchedHeader) {
+                                initialMapping[field.key] = matchedHeader;
+                                usedHeaders.add(matchedHeader);
+                            }
+                        });
+
+                        setColumnMapping(initialMapping);
+                        setStep(2);
+                    }
+                };
+                reader.readAsArrayBuffer(file);
+            };
+
+            const handleSaveCurriculum = () => {
+                const mappedLessons = parsedData.map((row, idx) => {
+                    const getVal = (key) => {
+                        const colHeader = columnMapping[key];
+                        if (!colHeader) return '';
+                        const colIdx = rawHeaders.indexOf(colHeader);
+                        return (colIdx !== -1 && row[colIdx] !== undefined) ? String(row[colIdx]).trim() : '';
+                    };
+
+                    const rawLessonStr = getVal('lessonNumber');
+                    const numMatch = rawLessonStr.replace(/[^0-9]/g, '');
+                    const parsedNum = parseInt(numMatch, 10);
+                    const lessonNum = (!isNaN(parsedNum) && parsedNum > 0) ? parsedNum : (idx + 1);
+
+                    return {
+                        id: `l_imp_${Date.now()}_${idx}`,
+                        lessonNumber: lessonNum,
+                        unit: getVal('unit') || '미지정 단원',
+                        topic: getVal('topic') || `${lessonNum}차시 수업`,
+                        objective: getVal('objective') || '',
+                        mainActivity: getVal('mainActivity') || '',
+                        gameActivity: getVal('gameActivity') || '',
+                        materials: getVal('materials') || '',
+                        assessment: getVal('assessment') || '',
+                        edutech: getVal('edutech') || ''
+                    };
+                });
+
+                const totalLessonsCount = mappedLessons.length;
+                const newCurriculumId = `curr_${Date.now()}`;
+                const newCurriculum = {
+                    id: newCurriculumId,
+                    schoolYearId: selectedSchoolYearId,
+                    gradeId: selectedGradeId,
+                    semester: '2학기',
+                    subject: '체육',
+                    title: `가져온 교육과정 (${totalLessonsCount}차시)`,
+                    totalLessons: totalLessonsCount,
+                    lessons: mappedLessons
+                };
+
+                const updatedGrades = db.grades.map(g => 
+                    g.id === selectedGradeId ? { ...g, curriculumId: newCurriculumId } : g
+                );
+
+                setDb(prev => ({
+                    ...prev,
+                    curriculums: [...prev.curriculums, newCurriculum],
+                    grades: updatedGrades
+                }));
+
+                showToast(`🎉 총 ${totalLessonsCount}차시의 교육과정을 성공적으로 등록하고 연결했습니다!`, 'success');
+                onFinish();
+            };
+
+            return (
+                <div className="max-w-4xl mx-auto space-y-6">
+                    <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
+                        <h2 className="text-2xl font-bold text-slate-900">교육과정 Excel 가져오기</h2>
+                        <p className="text-slate-500 text-sm mt-1">
+                            보유하신 체육 교육과정 Excel/CSV 파일을 업로드하여 자동으로 매핑합니다.
+                        </p>
+                    </div>
+
+                    {step === 1 && (
+                        <div 
+                            onDragOver={(e) => e.preventDefault()}
+                            onDrop={(e) => {
+                                e.preventDefault();
+                                if (e.dataTransfer.files[0]) handleFileUpload(e.dataTransfer.files[0]);
+                            }}
+                            className="bg-white border-2 border-dashed border-sky-300 hover:border-sky-500 rounded-3xl p-12 text-center transition cursor-pointer space-y-4"
+                        >
+                            <div className="w-20 h-20 bg-sky-50 text-sky-600 rounded-full flex items-center justify-center mx-auto text-3xl">
+                                <i className="fa-solid fa-file-excel"></i>
+                            </div>
+                            <div>
+                                <h3 className="text-lg font-bold text-slate-800">Excel 파일을 여기에 끌어다 놓으세요</h3>
+                                <p className="text-sm text-slate-400 mt-1">.xlsx, .xls, .csv 확장자 지원</p>
+                            </div>
+                            <label className="inline-block bg-sky-600 hover:bg-sky-500 text-white px-6 py-3 rounded-xl font-bold text-sm cursor-pointer transition shadow">
+                                파일 선택
+                                <input 
+                                    type="file" 
+                                    accept=".xlsx, .xls, .csv" 
+                                    className="hidden" 
+                                    onChange={(e) => e.target.files[0] && handleFileUpload(e.target.files[0])}
+                                />
+                            </label>
+                        </div>
+                    )}
+
+                    {step === 2 && (
+                        <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-6">
+                            <div className="flex justify-between items-center border-b pb-3">
+                                <div>
+                                    <h3 className="text-lg font-bold text-slate-800">Excel 열 매핑 지정</h3>
+                                    <p className="text-xs text-slate-500 mt-0.5">스마트 엔진이 자동으로 일치하는 열을 선택했습니다. 필요 시 수정하세요.</p>
+                                </div>
+                                <span className="bg-sky-50 text-sky-700 font-bold text-xs px-3 py-1 rounded-full border border-sky-200">
+                                    ✨ 스마트 자동 매핑 완료
+                                </span>
+                            </div>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                {TARGET_FIELDS.map(field => {
+                                    const isAutoMatched = Boolean(columnMapping[field.key]);
+                                    return (
+                                        <div key={field.key} className={`p-3.5 rounded-xl border transition ${isAutoMatched ? 'bg-sky-50/50 border-sky-200' : 'bg-slate-50 border-slate-200'}`}>
+                                            <div className="flex justify-between items-center mb-1">
+                                                <label className="block text-xs font-bold text-slate-700">
+                                                    {field.name} {field.required && <span className="text-rose-500">*</span>}
+                                                </label>
+                                                {isAutoMatched && (
+                                                    <span className="text-[10px] font-extrabold text-sky-600 bg-sky-100 px-1.5 py-0.5 rounded">
+                                                        자동 감지됨
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <select 
+                                                value={columnMapping[field.key] || ''}
+                                                onChange={(e) => setColumnMapping({ ...columnMapping, [field.key]: e.target.value })}
+                                                className="w-full p-2 border rounded-lg text-sm bg-white font-medium focus:ring-2 focus:ring-sky-500"
+                                            >
+                                                <option value="">-- Excel 열 선택 --</option>
+                                                {rawHeaders.map((h, i) => (
+                                                    <option key={i} value={h}>{h}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+
+                            <div className="pt-4 border-t flex justify-between items-center">
+                                <button onClick={() => setStep(1)} className="px-4 py-2 border rounded-lg text-sm font-bold">다시 업로드</button>
+                                <button onClick={() => setStep(3)} className="px-6 py-2.5 bg-sky-600 text-white rounded-xl text-sm font-bold hover:bg-sky-500 cursor-pointer">다음: 미리보기</button>
+                            </div>
+                        </div>
+                    )}
+
+                    {step === 3 && (
+                        <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-6">
+                            <div className="flex justify-between items-center">
+                                <div>
+                                    <h3 className="text-lg font-bold text-slate-800">가져오기 미리보기 (총 {parsedData.length}개 차시)</h3>
+                                    <p className="text-xs text-slate-500">연결할 학년을 선택하고 데이터 구조를 확인하세요.</p>
+                                </div>
+                                <select 
+                                    value={selectedGradeId}
+                                    onChange={(e) => setSelectedGradeId(e.target.value)}
+                                    className="p-2 border rounded-xl font-bold text-sm bg-slate-50"
+                                >
+                                    {currentGrades.map(g => (
+                                        <option key={g.id} value={g.id}>{g.displayName} 교육과정으로 연결</option>
+                                    ))}
+                                </select>
+                            </div>
+
+                            <div className="max-h-80 overflow-y-auto border rounded-xl">
+                                <table className="w-full text-left text-xs">
+                                    <thead className="bg-slate-100 sticky top-0 font-bold border-b">
+                                        <tr>
+                                            <th className="p-2">차시</th>
+                                            <th className="p-2">단원</th>
+                                            <th className="p-2">소주제</th>
+                                            <th className="p-2">준비물</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y">
+                                        {parsedData.map((r, i) => (
+                                            <tr key={i}>
+                                                <td className="p-2 font-bold">{i+1}</td>
+                                                <td className="p-2">{r[rawHeaders.indexOf(columnMapping.unit)] || '-'}</td>
+                                                <td className="p-2 font-medium">{r[rawHeaders.indexOf(columnMapping.topic)] || '-'}</td>
+                                                <td className="p-2">{r[rawHeaders.indexOf(columnMapping.materials)] || '-'}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <div className="pt-4 border-t flex justify-between items-center">
+                                <button onClick={() => setStep(2)} className="px-4 py-2 border rounded-lg text-sm font-bold">매핑 수정</button>
+                                <button onClick={handleSaveCurriculum} className="px-8 py-3 bg-emerald-600 text-white rounded-xl text-base font-extrabold hover:bg-emerald-500 shadow-lg cursor-pointer">
+                                    교육과정으로 최종 등록 ({parsedData.length}차시)
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        function EquipmentManagerView({ db, setDb, showToast }) {
+            const [newItemName, setNewItemName] = React.useState('');
+            const [newItemQty, setNewItemQty] = React.useState(10);
+
+            const handleAddEquipment = (e) => {
+                e.preventDefault();
+                if (!newItemName.trim()) return;
+
+                const newEquipment = {
+                    id: `eq_${Date.now()}`,
+                    name: newItemName.trim(),
+                    quantity: parseInt(newItemQty) || 0
+                };
+
+                setDb(prev => ({
+                    ...prev,
+                    equipment: [...prev.equipment, newEquipment]
+                }));
+                showToast('🏀 새 교구가 등록되었습니다.');
+                setNewItemName('');
+            };
+
+            const handleUpdateQty = (id, delta) => {
+                setDb(prev => ({
+                    ...prev,
+                    equipment: prev.equipment.map(e => 
+                        e.id === id ? { ...e, quantity: Math.max(0, e.quantity + delta) } : e
+                    )
+                }));
+            };
+
+            return (
+                <div className="space-y-6 max-w-4xl mx-auto">
+                    <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
+                        <h2 className="text-2xl font-bold text-slate-900">학교 체육 교구 수량 관리</h2>
+                        <p className="text-slate-500 text-sm mt-1">
+                            보유한 체육 교구를 등록하면 차시별 준비물과 비교하여 부족 시 자동으로 알림을 표시합니다.
+                        </p>
+                    </div>
+
+                    <form onSubmit={handleAddEquipment} className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm flex flex-wrap gap-3 items-end">
+                        <div className="flex-1 min-w-[200px]">
+                            <label className="block text-xs font-bold text-slate-600 mb-1">교구명</label>
+                            <input 
+                                type="text" 
+                                placeholder="예: 농구공, 후프, 피구공..." 
+                                value={newItemName}
+                                onChange={(e) => setNewItemName(e.target.value)}
+                                className="w-full p-2.5 border rounded-xl text-sm font-medium"
+                            />
+                        </div>
+                        <div className="w-32">
+                            <label className="block text-xs font-bold text-slate-600 mb-1">보유 수량</label>
+                            <input 
+                                type="number" 
+                                value={newItemQty}
+                                onChange={(e) => setNewItemQty(e.target.value)}
+                                className="w-full p-2.5 border rounded-xl text-sm font-medium"
+                            />
+                        </div>
+                        <button type="submit" className="bg-sky-600 hover:bg-sky-500 text-white font-bold px-6 py-2.5 rounded-xl text-sm transition cursor-pointer">
+                            교구 추가
+                        </button>
+                    </form>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+                        {db.equipment.map(item => (
+                            <div key={item.id} className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm flex justify-between items-center">
+                                <div>
+                                    <h4 className="font-bold text-slate-800">{item.name}</h4>
+                                    <span className={`text-xs font-bold ${item.quantity < 10 ? 'text-amber-600' : 'text-slate-400'}`}>
+                                        {item.quantity < 10 ? '⚠️ 수량 부족 주의' : '정상 보유'}
+                                    </span>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <button onClick={() => handleUpdateQty(item.id, -1)} className="w-8 h-8 rounded-lg bg-slate-100 hover:bg-slate-200 font-bold">-</button>
+                                    <span className="font-extrabold text-lg text-sky-600 w-8 text-center">{item.quantity}</span>
+                                    <button onClick={() => handleUpdateQty(item.id, 1)} className="w-8 h-8 rounded-lg bg-slate-100 hover:bg-slate-200 font-bold">+</button>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+        }
+
+        function AiHelperView({ currentCurriculum, currentClasses, db }) {
+            const [promptQuery, setPromptQuery] = React.useState('');
+            const [selectedClassId, setSelectedClassId] = React.useState(currentClasses[0]?.id || '');
+            const [aiResponse, setAiResponse] = React.useState('');
+            const [isLoading, setIsLoading] = React.useState(false);
+
+            const activeClass = currentClasses.find(c => c.id === selectedClassId) || currentClasses[0];
+            const currentLessonNum = activeClass ? (db.classProgressCursors[activeClass.id] || 1) : 1;
+            const currentLesson = currentCurriculum?.lessons.find(l => l.lessonNumber === currentLessonNum);
+
+            const handleAskAi = async (customQuestion) => {
+                const question = customQuestion || promptQuery;
+                if (!question.trim()) return;
+
+                setIsLoading(true);
+                setAiResponse('');
+
+                const systemInstruction = `당신은 대한민국 초등학교 베테랑 체육 전담교사이자 AI 교수학습 컨설턴트입니다.
+현재 차시 정보와 학급 상황을 바탕으로 실질적이고 현장감 있는 체육 수업 팁을 제공해 주세요.`;
+
+                const userPrompt = `[수업 맥락 정보]
+- 학급: ${activeClass?.displayName || '학급'}
+- 현재 차시: ${currentLessonNum}차시
+- 단원: ${currentLesson?.unit || '-'}
+- 소주제: ${currentLesson?.topic || '-'}
+- 목표: ${currentLesson?.objective || '-'}
+- 핵심활동: ${currentLesson?.mainActivity || '-'}
+- 준비물: ${currentLesson?.materials || '-'}
+
+[선생님의 질문]
+"${question}"
+
+위 상황을 반영하여 구체적이고 바로 적용 가능한 아이디어나 조언을 불릿 포인트로 답변해 주세요.`;
+
+                try {
+                    const apiKey = ""; 
+                    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+
+                    const payload = {
+                        contents: [{ parts: [{ text: userPrompt }] }],
+                        systemInstruction: { parts: [{ text: systemInstruction }] }
+                    };
+
+                    const res = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    const data = await res.json();
+                    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '답변을 생성하지 못했습니다.';
+                    setAiResponse(text);
+                } catch (err) {
+                    setAiResponse('AI 답변 호출 중 오류가 발생했습니다. 네트워크 연결을 확인하세요.');
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
+            return (
+                <div className="max-w-4xl mx-auto space-y-6">
+                    <div className="bg-gradient-to-r from-indigo-600 to-purple-600 rounded-2xl p-6 text-white shadow-md">
+                        <h2 className="text-2xl font-bold flex items-center gap-2">
+                            <i className="fa-solid fa-robot"></i> AI 체육 수업 도우미
+                        </h2>
+                        <p className="text-purple-100 text-sm mt-1">
+                            현재 진행중인 차시 정보를 AI가 자동으로 분석하여 현장 맞춤형 조언을 제공합니다.
+                        </p>
+                    </div>
+
+                    <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm flex items-center gap-4">
+                        <label className="text-sm font-bold text-slate-700 whitespace-nowrap">대상 학급 선택:</label>
+                        <select 
+                            value={selectedClassId}
+                            onChange={(e) => setSelectedClassId(e.target.value)}
+                            className="p-2 border rounded-xl font-bold text-sm bg-slate-50"
+                        >
+                            {currentClasses.map(c => (
+                                <option key={c.id} value={c.id}>{c.displayName}반 ({db.classProgressCursors[c.id] || 1}차시 진행 예정)</option>
+                            ))}
+                        </select>
+                    </div>
+
+                    <div className="flex flex-wrap gap-2">
+                        {[
+                            '🌧️ 비가 와서 실내 체육관 활동으로 변경하려면?',
+                            '🏀 교구가 부족할 때 대체 변형 게임법',
+                            '⚡ 운동 기능이 서툰 학생 지원 방안',
+                            '⏱️ 40분 수업 시간 배분 재구성 팁',
+                            '🛡️ 안전사고 예방 핵심 주의사항'
+                        ].map((q, idx) => (
+                            <button
+                                key={idx}
+                                onClick={() => {
+                                    setPromptQuery(q);
+                                    handleAskAi(q);
+                                }}
+                                className="px-3.5 py-2 bg-white hover:bg-slate-100 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 transition shadow-sm cursor-pointer"
+                            >
+                                {q}
+                            </button>
+                        ))}
+                    </div>
+
+                    <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm flex gap-2">
+                        <input 
+                            type="text" 
+                            placeholder="수업 관련 질문을 자유롭게 입력하세요..." 
+                            value={promptQuery}
+                            onChange={(e) => setPromptQuery(e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && handleAskAi()}
+                            className="flex-1 p-3 border border-slate-200 rounded-xl text-sm font-medium focus:ring-2 focus:ring-indigo-500"
+                        />
+                        <button 
+                            onClick={() => handleAskAi()}
+                            disabled={isLoading}
+                            className="bg-indigo-600 hover:bg-indigo-500 text-white px-6 py-3 rounded-xl font-bold text-sm transition shrink-0 cursor-pointer"
+                        >
+                            {isLoading ? '생성 중...' : '질문하기'}
+                        </button>
+                    </div>
+
+                    {aiResponse && (
+                        <div className="bg-white rounded-2xl p-6 border border-indigo-100 shadow-md space-y-3">
+                            <h3 className="font-bold text-indigo-900 text-lg flex items-center gap-2 border-b pb-2">
+                                <i className="fa-solid fa-sparkles text-amber-500"></i> AI 추천 답변
+                            </h3>
+                            <div className="text-slate-800 leading-relaxed whitespace-pre-line text-sm font-medium">
+                                {aiResponse}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        function SettingsManagerView({ db, setDb, selectedSchoolYearId, showToast }) {
+            const [newYearName, setNewYearName] = React.useState('');
+            const [newGradeNum, setNewGradeNum] = React.useState(4);
+            const [showResetConfirm, setShowResetConfirm] = React.useState(false);
+            const [resetMode, setResetMode] = React.useState('YEAR');
+
+            const currentYearObj = db.schoolYears.find(sy => sy.id === selectedSchoolYearId) || { year: '현재 학년도' };
+            const yearGrades = db.grades.filter(g => g.schoolYearId === selectedSchoolYearId);
+
+            const handleAddYear = (e) => {
+                e.preventDefault();
+                if (!newYearName.trim()) return;
+                const newSy = { id: `sy_${Date.now()}`, year: newYearName.trim(), isCurrent: false };
+                setDb(prev => ({ ...prev, schoolYears: [...prev.schoolYears, newSy] }));
+                setNewYearName('');
+                showToast(`📅 ${newYearName.trim()} 학년도가 추가되었습니다.`);
+            };
+
+            const handleAddGrade = () => {
+                const existingGrade = db.grades.find(g => g.schoolYearId === selectedSchoolYearId && g.gradeNumber === newGradeNum);
+                if (existingGrade) {
+                    showToast(`⚠️ 이미 ${newGradeNum}학년이 등록되어 있습니다.`, 'info');
+                    return;
+                }
+
+                const gradeId = `g_${Date.now()}`;
+                const newGrade = {
+                    id: gradeId,
+                    schoolYearId: selectedSchoolYearId,
+                    gradeNumber: newGradeNum,
+                    displayName: `${newGradeNum}학년`,
+                    active: true,
+                    curriculumId: null
+                };
+
+                const newClasses = Array.from({ length: 5 }, (_, i) => ({
+                    id: `c_${gradeId}_${i+1}`,
+                    gradeId: gradeId,
+                    classNumber: i + 1,
+                    displayName: `${newGradeNum}-${i+1}`,
+                    active: true
+                }));
+
+                setDb(prev => ({
+                    ...prev,
+                    grades: [...prev.grades, newGrade],
+                    classes: [...prev.classes, ...newClasses]
+                }));
+                showToast(`🎓 ${newGradeNum}학년 (1~5반)이 성공적으로 추가되었습니다.`, 'success');
+            };
+
+            const handleDeleteGrade = (gradeId) => {
+                const targetGrade = db.grades.find(g => g.id === gradeId);
+                if (!targetGrade) return;
+
+                setDb(prev => {
+                    const filteredGrades = prev.grades.filter(g => g.id !== gradeId);
+                    const classIdsToRemove = new Set(prev.classes.filter(c => c.gradeId === gradeId).map(c => c.id));
+                    const filteredClasses = prev.classes.filter(c => c.gradeId !== gradeId);
+
+                    const updatedRecords = { ...prev.lessonRecords };
+                    Object.keys(updatedRecords).forEach(key => {
+                        const classId = key.substring(0, key.lastIndexOf('_'));
+                        if (classIdsToRemove.has(classId)) {
+                            delete updatedRecords[key];
+                        }
+                    });
+
+                    const updatedCursors = { ...prev.classProgressCursors };
+                    classIdsToRemove.forEach(cId => {
+                        delete updatedCursors[cId];
+                    });
+
+                    return {
+                        ...prev,
+                        grades: filteredGrades,
+                        classes: filteredClasses,
+                        lessonRecords: updatedRecords,
+                        classProgressCursors: updatedCursors
+                    };
+                });
+
+                showToast(`🗑️ ${targetGrade.displayName}이(가) 삭제되었습니다.`);
+            };
+
+            const handleAddClassToGrade = (gradeObj) => {
+                const existingClasses = db.classes.filter(c => c.gradeId === gradeObj.id);
+                const nextNum = existingClasses.length + 1;
+                const newClass = {
+                    id: `c_${gradeObj.id}_${Date.now()}`,
+                    gradeId: gradeObj.id,
+                    classNumber: nextNum,
+                    displayName: `${gradeObj.gradeNumber}-${nextNum}`,
+                    active: true
+                };
+
+                setDb(prev => ({
+                    ...prev,
+                    classes: [...prev.classes, newClass]
+                }));
+                showToast(`➕ ${gradeObj.displayName}에 ${gradeObj.gradeNumber}-${nextNum}반이 추가되었습니다.`);
+            };
+
+            const handleRemoveClassFromGrade = (gradeObj) => {
+                const existingClasses = db.classes.filter(c => c.gradeId === gradeObj.id);
+                if (existingClasses.length <= 1) {
+                    showToast('⚠️ 최소 1개 이상의 학급이 필요합니다.', 'info');
+                    return;
+                }
+                const classToRemove = existingClasses[existingClasses.length - 1];
+
+                setDb(prev => {
+                    const filteredClasses = prev.classes.filter(c => c.id !== classToRemove.id);
+                    const updatedRecords = { ...prev.lessonRecords };
+                    Object.keys(updatedRecords).forEach(key => {
+                        if (key.startsWith(`${classToRemove.id}_`)) {
+                            delete updatedRecords[key];
+                        }
+                    });
+
+                    const updatedCursors = { ...prev.classProgressCursors };
+                    delete updatedCursors[classToRemove.id];
+
+                    return {
+                        ...prev,
+                        classes: filteredClasses,
+                        lessonRecords: updatedRecords,
+                        classProgressCursors: updatedCursors
+                    };
+                });
+                showToast(`➖ ${classToRemove.displayName}반이 삭제되었습니다.`);
+            };
+
+            const handleConfirmReset = () => {
+                if (resetMode === 'YEAR') {
+                    setDb(prev => {
+                        const yearGradeIds = new Set(prev.grades.filter(g => g.schoolYearId === selectedSchoolYearId).map(g => g.id));
+                        const yearClassIds = new Set(prev.classes.filter(c => yearGradeIds.has(c.gradeId)).map(c => c.id));
+
+                        const updatedRecords = { ...prev.lessonRecords };
+                        Object.keys(updatedRecords).forEach(key => {
+                            const classId = key.substring(0, key.lastIndexOf('_'));
+                            if (yearClassIds.has(classId)) {
+                                delete updatedRecords[key];
+                            }
+                        });
+
+                        const updatedCursors = { ...prev.classProgressCursors };
+                        yearClassIds.forEach(cId => {
+                            delete updatedCursors[cId];
+                        });
+
+                        return {
+                            ...prev,
+                            grades: prev.grades.filter(g => g.schoolYearId !== selectedSchoolYearId),
+                            classes: prev.classes.filter(c => !yearGradeIds.has(c.gradeId)),
+                            curriculums: prev.curriculums.filter(c => c.schoolYearId !== selectedSchoolYearId),
+                            lessonRecords: updatedRecords,
+                            classProgressCursors: updatedCursors
+                        };
+                    });
+                    showToast(`🔄 [${currentYearObj.year}] 데이터만 선택적으로 초기화되었습니다.`, 'success');
+                } else {
+                    localStorage.removeItem('PE_MASTER_DB_V3');
+                    setDb(INITIAL_SEED);
+                    showToast('🔄 모든 데이터가 초기 샘플 상태로 전체 리셋되었습니다.', 'success');
+                }
+                setShowResetConfirm(false);
+            };
+
+            const handleExportData = () => {
+                const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(db));
+                const downloadAnchor = document.createElement('a');
+                downloadAnchor.setAttribute("href", dataStr);
+                downloadAnchor.setAttribute("download", `PE_Master_Backup_${new Date().toISOString().split('T')[0]}.json`);
+                document.body.appendChild(downloadAnchor);
+                downloadAnchor.click();
+                downloadAnchor.remove();
+            };
+
+            return (
+                <div className="max-w-4xl mx-auto space-y-6">
+                    <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
+                        <h2 className="text-2xl font-bold text-slate-900">시스템 및 학년/학급 관리</h2>
+                        <p className="text-slate-500 text-sm mt-1">
+                            학년도 및 담당 학년을 구성하고 데이터를 안전하게 개별 관리/백업합니다.
+                        </p>
+                    </div>
+
+                    <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-4">
+                        <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                            <i className="fa-regular fa-calendar-plus text-sky-600"></i> 학년도 추가
+                        </h3>
+                        <form onSubmit={handleAddYear} className="flex gap-2">
+                            <input 
+                                type="text" 
+                                placeholder="예: 2028학년도" 
+                                value={newYearName}
+                                onChange={(e) => setNewYearName(e.target.value)}
+                                className="p-2.5 border rounded-xl flex-1 text-sm font-medium focus:ring-2 focus:ring-sky-500"
+                            />
+                            <button type="submit" className="bg-slate-800 hover:bg-slate-700 text-white font-bold px-5 py-2.5 rounded-xl text-sm transition shadow cursor-pointer">
+                                학년도 추가
+                            </button>
+                        </form>
+                    </div>
+
+                    <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-6">
+                        <div className="flex flex-wrap justify-between items-center gap-3 border-b pb-4">
+                            <div>
+                                <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                                    <i className="fa-solid fa-users-gear text-sky-600"></i> [{currentYearObj.year}] 담당 학년 및 학급 구성
+                                </h3>
+                                <p className="text-xs text-slate-500 mt-0.5">선택된 학년도에 속하는 학년을 등록하거나 삭제/수정할 수 있습니다.</p>
+                            </div>
+
+                            <div className="flex items-center gap-2 bg-slate-50 p-2 rounded-xl border border-slate-200">
+                                <select 
+                                    value={newGradeNum} 
+                                    onChange={(e) => setNewGradeNum(parseInt(e.target.value))}
+                                    className="p-2 border rounded-xl text-sm font-bold bg-white"
+                                >
+                                    {[1, 2, 3, 4, 5, 6].map(n => <option key={n} value={n}>{n}학년</option>)}
+                                </select>
+                                <button 
+                                    onClick={handleAddGrade} 
+                                    className="bg-sky-600 hover:bg-sky-500 text-white font-bold px-4 py-2 rounded-xl text-xs transition cursor-pointer shadow-sm flex items-center gap-1"
+                                >
+                                    <i className="fa-solid fa-plus"></i> 학년 추가
+                                </button>
+                            </div>
+                        </div>
+
+                        {yearGrades.length === 0 ? (
+                            <div className="text-center py-8 text-slate-400 text-sm bg-slate-50 rounded-xl border border-dashed">
+                                등록된 학년이 없습니다. 위에서 학년을 선택하고 [학년 추가]를 누르세요.
+                            </div>
+                        ) : (
+                            <div className="space-y-4">
+                                {yearGrades.map(g => {
+                                    const classesInGrade = db.classes.filter(c => c.gradeId === g.id);
+
+                                    return (
+                                        <div key={g.id} className="bg-slate-50 p-4 rounded-xl border border-slate-200 flex flex-wrap justify-between items-center gap-4">
+                                            <div className="space-y-1">
+                                                <div className="flex items-center gap-2">
+                                                    <span className="font-extrabold text-base text-slate-900 bg-white px-3 py-1 rounded-lg border border-slate-200 shadow-sm">
+                                                        {g.displayName}
+                                                    </span>
+                                                    <span className="text-xs font-bold text-sky-600">
+                                                        총 {classesInGrade.length}개 학급 ({classesInGrade.map(c => `${c.classNumber}반`).join(', ')})
+                                                    </span>
+                                                </div>
+                                            </div>
+
+                                            <div className="flex items-center gap-2">
+                                                <div className="flex items-center gap-1 bg-white border border-slate-200 rounded-lg p-1">
+                                                    <button 
+                                                        onClick={() => handleRemoveClassFromGrade(g)}
+                                                        className="px-2 py-0.5 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded cursor-pointer"
+                                                        title="반 1개 제거"
+                                                    >
+                                                        - 반 삭제
+                                                    </button>
+                                                    <span className="text-xs font-bold text-slate-400">|</span>
+                                                    <button 
+                                                        onClick={() => handleAddClassToGrade(g)}
+                                                        className="px-2 py-0.5 text-xs font-bold text-sky-600 hover:bg-sky-50 rounded cursor-pointer"
+                                                        title="반 1개 추가"
+                                                    >
+                                                        + 반 추가
+                                                    </button>
+                                                </div>
+
+                                                <button 
+                                                    onClick={() => handleDeleteGrade(g.id)}
+                                                    className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 text-xs font-bold rounded-lg border border-rose-200 transition flex items-center gap-1 cursor-pointer"
+                                                    title={`${g.displayName} 및 하위 학급 정보 삭제`}
+                                                >
+                                                    <i className="fa-solid fa-trash-can"></i> 학년 삭제
+                                                </button>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-4">
+                        <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                            <i className="fa-solid fa-database text-sky-600"></i> 데이터 백업 및 선택적 초기화
+                        </h3>
+                        <p className="text-xs text-slate-500">
+                            특정 학년도의 데이터를 초기화하더라도 다른 학년도의 백업 기록은 안전하게 분리·보존됩니다.
+                        </p>
+                        <div className="flex flex-wrap gap-3 pt-2">
+                            <button onClick={handleExportData} className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-5 py-2.5 rounded-xl text-sm flex items-center gap-2 transition shadow cursor-pointer">
+                                <i className="fa-solid fa-download"></i> 데이터 JSON 백업 다운로드
+                            </button>
+                            <button 
+                                onClick={() => {
+                                    setResetMode('YEAR');
+                                    setShowResetConfirm(true);
+                                }} 
+                                className="bg-rose-600 hover:bg-rose-500 text-white font-bold px-5 py-2.5 rounded-xl text-sm flex items-center gap-2 transition shadow cursor-pointer"
+                            >
+                                <i className="fa-solid fa-rotate-left"></i> 데이터 초기화 설정...
+                            </button>
+                        </div>
+
+                        {showResetConfirm && (
+                            <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+                                <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-5 border border-slate-200">
+                                    <div className="flex items-center gap-3 text-rose-600 border-b pb-3">
+                                        <i className="fa-solid fa-triangle-exclamation text-3xl"></i>
+                                        <h3 className="text-xl font-bold text-slate-900">데이터 초기화 방식 선택</h3>
+                                    </div>
+
+                                    <div className="space-y-3">
+                                        <label 
+                                            onClick={() => setResetMode('YEAR')}
+                                            className={`p-4 rounded-xl border-2 flex items-start gap-3 cursor-pointer transition ${
+                                                resetMode === 'YEAR' ? 'border-sky-500 bg-sky-50/50' : 'border-slate-200 hover:bg-slate-50'
+                                            }`}
+                                        >
+                                            <input 
+                                                type="radio" 
+                                                name="resetType" 
+                                                checked={resetMode === 'YEAR'} 
+                                                onChange={() => setResetMode('YEAR')}
+                                                className="mt-1"
+                                            />
+                                            <div>
+                                                <strong className="block text-slate-900 text-sm">
+                                                    [{currentYearObj.year}] 데이터만 초기화 (권장)
+                                                </strong>
+                                                <span className="text-xs text-slate-500 mt-0.5 block leading-relaxed">
+                                                    현재 선택된 <strong>{currentYearObj.year}</strong>의 학급 진도, 차시 메모, 연결된 교육과정만 초기화하며, <u>타 학년도 데이터는 안전하게 보존</u>됩니다.
+                                                </span>
+                                            </div>
+                                        </label>
+
+                                        <label 
+                                            onClick={() => setResetMode('ALL')}
+                                            className={`p-4 rounded-xl border-2 flex items-start gap-3 cursor-pointer transition ${
+                                                resetMode === 'ALL' ? 'border-rose-500 bg-rose-50/50' : 'border-slate-200 hover:bg-slate-50'
+                                            }`}
+                                        >
+                                            <input 
+                                                type="radio" 
+                                                name="resetType" 
+                                                checked={resetMode === 'ALL'} 
+                                                onChange={() => setResetMode('ALL')}
+                                                className="mt-1"
+                                            />
+                                            <div>
+                                                <strong className="block text-rose-700 text-sm">
+                                                    전체 시스템 공장 초기화
+                                                </strong>
+                                                <span className="text-xs text-slate-500 mt-0.5 block leading-relaxed">
+                                                    모든 학년도의 전체 기록과 설정 데이터를 완전히 삭제하고 처음 샘플 상태로 되돌립니다.
+                                                </span>
+                                            </div>
+                                        </label>
+                                    </div>
+
+                                    <div className="pt-2 flex justify-end gap-3 border-t">
+                                        <button 
+                                            onClick={() => setShowResetConfirm(false)}
+                                            className="px-5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-sm transition cursor-pointer"
+                                        >
+                                            취소
+                                        </button>
+                                        <button 
+                                            onClick={handleConfirmReset}
+                                            className={`px-5 py-2.5 text-white rounded-xl font-bold text-sm transition shadow-md cursor-pointer ${
+                                                resetMode === 'YEAR' ? 'bg-sky-600 hover:bg-sky-500' : 'bg-rose-600 hover:bg-rose-500'
+                                            }`}
+                                        >
+                                            {resetMode === 'YEAR' ? `[${currentYearObj.year}] 데이터만 초기화` : '전체 데이터 초기화 실행'}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
